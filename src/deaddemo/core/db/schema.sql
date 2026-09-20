@@ -168,6 +168,29 @@ CREATE TABLE IF NOT EXISTS annotations (
   updated_at TEXT
 );
 
+-- Per-player per-match derived stats (computed at parse time from the bulk datasets).
+CREATE TABLE IF NOT EXISTS match_player_extras (
+  match_id         INTEGER NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+  hero_id          INTEGER NOT NULL,
+  headshot_hits    INTEGER, bullet_hits INTEGER,
+  bullet_dmg       INTEGER, spirit_dmg INTEGER, melee_dmg INTEGER, other_dmg INTEGER,
+  hero_healing     INTEGER, self_healing INTEGER, objective_damage INTEGER,
+  max_kill_streak  INTEGER,
+  multi2 INTEGER, multi3 INTEGER, multi4 INTEGER, multi5 INTEGER, multi6 INTEGER,
+  solo_kills       INTEGER,
+  first_blood      INTEGER,                 -- 1 attacker, -1 victim, 0 uninvolved
+  teamfights       INTEGER, teamfights_won INTEGER,
+  souls_10m INTEGER, souls_20m INTEGER, level_10m INTEGER, level_20m INTEGER,
+  PRIMARY KEY (match_id, hero_id)
+);
+
+CREATE TABLE IF NOT EXISTS player_notes (
+  steam_id   INTEGER PRIMARY KEY,
+  tags       TEXT,
+  comment    TEXT,
+  updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS calibrations (
   map_name       TEXT PRIMARY KEY,
   image_path     TEXT,

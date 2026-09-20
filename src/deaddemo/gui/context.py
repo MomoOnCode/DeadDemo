@@ -13,6 +13,7 @@ from deaddemo.core.db.repos import (
     DownloadRepo,
     HistoryRepo,
     MatchRepo,
+    PlayerNotesRepo,
     TagRepo,
 )
 from deaddemo.core.steam import locator
@@ -30,6 +31,7 @@ class AppEvents(QObject):
     status_message = Signal(str, int)  # message, timeout ms
     open_match = Signal(int)  # match_id
     open_viewer = Signal(int)  # match_id
+    open_player = Signal(object)  # steam_id64 (too large for Qt's 32-bit int signal payload)
 
 
 @dataclass
@@ -45,6 +47,7 @@ class AppContext:
     downloads: DownloadRepo = field(init=False)
     tags: TagRepo = field(init=False)
     calibrations: CalibrationRepo = field(init=False)
+    player_notes: PlayerNotesRepo = field(init=False)
 
     def __post_init__(self) -> None:
         self.demos = DemoRepo(self.db)
@@ -53,6 +56,7 @@ class AppContext:
         self.downloads = DownloadRepo(self.db)
         self.tags = TagRepo(self.db)
         self.calibrations = CalibrationRepo(self.db)
+        self.player_notes = PlayerNotesRepo(self.db)
 
     @classmethod
     def create(cls) -> AppContext:

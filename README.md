@@ -15,7 +15,7 @@ has downloaded, archive them before Valve expires them, parse them into stats, a
 | Demos | Scans `game\citadel\replays` (and `addons\replays`, the download folder, extra folders), reads build/map/match id from each demo header, flags `.dem.partial` leftovers and demos older than the installed client, parses on demand, copies a `playdemo` command for the in-game console. |
 | Matches | Your match history from deadlock-api.com with local/parsed/downloading state, one-click download of replays that have a known URL, "download everything missing from the last N days". |
 | Match detail | Scoreboard per team, kill/objective/teamfight timeline, the in-game graph menu (souls, souls/min, kills, deaths, healing, lane stats, damage breakdown by ability/type/target, damage to/from players, healing by source) with Player/Team toggle plus extras (net worth lead, kill lead, rolling income, unspent souls, time dead), final builds with item icons and hover stats, purchase order, damage dealt/taken, chat, position/death/kill heatmaps, tags and comments, XLSX/JSON export. |
-| Players | Cross-match aggregates (games, win rate, KDA, souls per minute, hero pool) for every player seen in parsed demos. |
+| Players | Cross-match aggregates for every player seen in parsed demos, and a per-player profile (double-click): win ratio from history and from demos, K/D, KDA, kill participation, souls and damage per minute, headshot %, damage split, multi-kills, first blood, teamfights won, tempo at 10/20 min, lanes, nemesis and favourite victims, teammates and opponents with win rates, most bought and opening items, ranked badge history, hero pool, per-match trend graphs, an aggregate position heatmap, and notes. |
 | Viewer | 2D minimap playback with hero markers, health rings, movement trails, kill markers, objective markers, scrubbing, speed control, hero filters, jump-to-event. Manual calibration dialog if the default map transform is off. |
 | Settings | Paths, account override, parallel parses, extra boon datasets, viewer sampling. |
 
@@ -43,9 +43,41 @@ Packaging: `uv run pyinstaller packaging/deaddemo.spec` produces `dist/DeadDemo/
 
 - **Replay availability.** Valve only serves a replay if you know its `replay_salt`. deadlock-api.com
   knows the salt for matches its ingest tools have seen, which is a minority of a given player's own
-  matches. Matches without a salt show as "no replay" here; downloading them requires a Steam Game
-  Coordinator session (`GetMatchMetaData`), which is planned as an optional provider. Replays you
-  download in game land in the replays folder and are picked up by the scanner either way.
+  matches. For the rest the app can ask Valve's Game Coordinator directly through the `deaddemo-gc`
+  helper (see below). Replays you download in game land in the replays folder and are picked up by
+  the scanner either way.
+
+## Steam Game Coordinator helper (`gc/`)
+
+A small Rust binary built on [steam-vent](https://codeberg.org/icewind/steam-vent) that logs into
+Steam with *your* account and asks the Deadlock Game Coordinator for a match's replay salts, the same
+request the game makes when you press "Download replay". Valve allows roughly 40 of these per
+account per day; the app tracks the quota.
+
+```
+cd gc
+cargo build --release          # produces gc/target/release/deaddemo-gc(.exe); the app finds it there
+cd ..
+uv run deaddemo gc login       # once; prompts for password + Steam Guard, stores an encrypted token
+uv run deaddemo gc status
+```
+
+Or use Settings → Steam login in the GUI. After that, "Download" on the Matches page falls back to
+Steam automatically when deadlock-api has no salt.
+
+### Secrets
+
+- Nothing secret is ever written into the project folder; `.env`, `*.token` and `secrets/` are
+  git-ignored and `.env.example` documents the variables.
+- `DEADLOCK_API_KEY` (optional), `DEADDEMO_STEAM_USER`, `DEADDEMO_STEAM_PASSWORD`,
+  `DEADDEMO_STEAM_GUARD_CODE` are read from the environment or a `.env` file. The GUI login dialog
+  passes the password to the helper through its environment only.
+- The Steam token the helper returns is stored under the app data folder, encrypted with Windows
+  DPAPI (user-bound) on Windows and as a 0600 file elsewhere. `deaddemo gc logout` deletes it.
+- steam-vent stores its Steam Guard machine token in the OS user cache directory, so subsequent
+  logins on this machine do not prompt for a code again.
+- Being logged into Deadlock on the same account at the same time can make Steam reject the helper's
+  session; run lookups while the game is closed if that happens.
 - **Compression.** Replay URLs end in `.dem.bz2`, but Valve currently serves zstd frames. The
   downloader sniffs zstd, bzip2 and raw demos.
 - **Version lock.** The game refuses to play demos recorded on an older build. The Demos page shows

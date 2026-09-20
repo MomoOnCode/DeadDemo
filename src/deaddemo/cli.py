@@ -127,6 +127,41 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_gc(args: argparse.Namespace) -> int:
+    import getpass
+
+    from deaddemo.core import secrets
+    from deaddemo.core.gc import provider
+
+    if args.gc_command == "login":
+        user = secrets.get(secrets.ENV_STEAM_USER) or input("Steam username: ").strip()
+        password = secrets.get(secrets.ENV_STEAM_PASSWORD) or getpass.getpass("Steam password: ")
+        code = secrets.get(secrets.ENV_STEAM_GUARD_CODE) or (args.guard_code or "")
+        if not code and not args.no_guard:
+            code = input("Steam Guard code (blank to approve in the mobile app): ").strip()
+        data = provider.login(user, password, code or None)
+        print(f"logged in as {user} (steam id {data.get('steam_id64')}); token stored in "
+              f"{secrets.token_path(provider.TOKEN_NAME).parent}")
+        return 0
+    if args.gc_command == "logout":
+        provider.logout()
+        print("Steam token removed")
+        return 0
+    if args.gc_command == "status":
+        helper = provider.find_helper()
+        print(f"helper: {helper or 'NOT FOUND'}")
+        print(f"logged in: {provider.is_logged_in()} ({provider.logged_in_user() or '-'})")
+        print(f"quota used today: {provider.quota_used_today()}/{provider.DAILY_LIMIT}")
+        if provider.is_logged_in() and helper:
+            print("steam says:", json.dumps(provider.status()))
+        return 0
+    if args.gc_command == "salts":
+        for r in provider.fetch_salts([int(m) for m in args.match_id]):
+            print(json.dumps(r.__dict__))
+        return 0
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="deaddemo", description="Deadlock demo manager")
     p.add_argument("--version", action="version", version=f"deaddemo {__version__}")
@@ -164,10 +199,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--xlsx")
     s.add_argument("--json", dest="json_out")
     s.set_defaults(func=_cmd_export)
+
+    g = sub.add_parser("gc", help="Steam Game Coordinator helper (replay salts for your own matches)")
+    gs = g.add_subparsers(dest="gc_command", required=True)
+    gl = gs.add_parser("login", help="log into Steam once; stores an encrypted refresh token")
+    gl.add_argument("--guard-code", help="Steam Guard code (or set DEADDEMO_STEAM_GUARD_CODE)")
+    gl.add_argument("--no-guard", action="store_true", help="do not prompt for a code")
+    gs.add_parser("logout", help="delete the stored Steam token")
+    gs.add_parser("status", help="show helper, login and quota state")
+    gsl = gs.add_parser("salts", help="fetch replay salts for match ids")
+    gsl.add_argument("match_id", nargs="+")
+    g.set_defaults(func=_cmd_gc)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    from deaddemo.core import secrets
+
+    secrets.load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:

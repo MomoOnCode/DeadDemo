@@ -3,9 +3,11 @@ from __future__ import annotations
 from PySide6.QtCore import QSortFilterProxyModel, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSplitter,
     QTableView,
     QVBoxLayout,
@@ -51,7 +53,7 @@ class PlayerMatchesModel(RowTableModel):
                 Column("K/D/A", lambda r: f"{r['kills']}/{r['deaths']}/{r['assists']}"),
                 Column("Souls", lambda r: r["souls"], align_right=True),
                 Column("Length", lambda r: r["regulation_seconds"], fmt_clock, align_right=True),
-                Column("Parsed", lambda r: r["parsed_at"]),
+                Column("Analyzed", lambda r: r["parsed_at"]),
             ],
             parent,
         )
@@ -62,9 +64,22 @@ class PlayersPage(QWidget):
         super().__init__(parent)
         self.ctx = ctx
         layout = QVBoxLayout(self)
+        bar = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Filter players…")
-        layout.addWidget(self.search)
+        self.btn_open = QPushButton("Open profile")
+        self.btn_open.clicked.connect(self._open_profile)
+        self.btn_backfill = QPushButton("Compute missing stats")
+        self.btn_backfill.setToolTip("Derive headshots, multi-kills, teamfights… for games analyzed before this "
+                                     "version, without re-analyzing")
+        self.btn_backfill.clicked.connect(self._backfill)
+        bar.addWidget(self.search, 1)
+        bar.addWidget(self.btn_open)
+        bar.addWidget(self.btn_backfill)
+        layout.addLayout(bar)
+        hint = QLabel("Double-click a player for their profile")
+        hint.setStyleSheet("color: #888")
+        layout.addWidget(hint)
         split = QSplitter(Qt.Orientation.Vertical)
         layout.addWidget(split, 1)
 
@@ -88,7 +103,7 @@ class PlayersPage(QWidget):
         bottom = QWidget()
         bl = QVBoxLayout(bottom)
         bl.setContentsMargins(0, 0, 0, 0)
-        self.detail_label = QLabel("Select a player to list their parsed matches")
+        self.detail_label = QLabel("Select a player to list their analyzed games")
         bl.addWidget(self.detail_label)
         self.matches_model = PlayerMatchesModel(self)
         self.matches_table = QTableView()
@@ -103,6 +118,7 @@ class PlayersPage(QWidget):
 
         self.search.textChanged.connect(self.proxy.setFilterFixedString)
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._show_player())
+        self.table.doubleClicked.connect(lambda _i: self._open_profile())
         ctx.events.matches_changed.connect(self.reload)
         self.reload()
 
@@ -121,7 +137,24 @@ class PlayersPage(QWidget):
         rows = matches_for_player(self.ctx.db, p.steam_id)
         self.matches_model.set_rows(rows)
         self.matches_table.resizeColumnsToContents()
-        self.detail_label.setText(f"{p.player_name} — {len(rows)} parsed match(es)")
+        self.detail_label.setText(f"{p.player_name} — {len(rows)} analyzed game(s)")
+
+    def _open_profile(self) -> None:
+        p = self._selected()
+        if p:
+            self.ctx.events.open_player.emit(p.steam_id)
+
+    def _backfill(self) -> None:
+        from deaddemo.core.stats.extras import backfill_all
+
+        db = self.ctx.db
+
+        def work(progress, cancel):
+            return backfill_all(db, progress)
+
+        self.ctx.jobs.submit("backfill-extras", work,
+                             on_finished=lambda n: self.ctx.status(f"Computed stats for {n} match(es)"),
+                             on_failed=lambda e: self.ctx.status(f"Backfill failed: {e.splitlines()[0]}", 10000))
 
     def _open_match(self, index) -> None:
         r = self.matches_model.row_at(index)

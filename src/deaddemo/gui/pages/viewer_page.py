@@ -128,7 +128,7 @@ class ViewerPage(QWidget):
         self.timer.stop()
         match = self.ctx.matches.get(match_id)
         if match is None or not match.has_ticks:
-            self.ctx.status("This match has no position data (parse it or re-parse after 'Delete positions')")
+            self.ctx.status("This match has no position data (analyze it, or re-analyze after 'Delete positions')")
             return
         self.match = match
         players = self.ctx.matches.players(match_id)

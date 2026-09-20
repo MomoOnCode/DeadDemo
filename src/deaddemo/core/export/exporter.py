@@ -53,6 +53,36 @@ def export_match_json(match_id: int, dest: Path, *, db: Database | None = None) 
     return dest
 
 
+def export_player_xlsx(profile, dest: Path, *, db: Database | None = None) -> Path:
+    import xlsxwriter
+
+    from deaddemo.core.stats.player_profile import profile_to_rows
+    from deaddemo.core.stats.player_stats import matches_for_player
+
+    cat = catalog()
+    own = db is None
+    db = db or Database.open()
+    try:
+        matches = matches_for_player(db, profile.steam_id)
+    finally:
+        if own:
+            db.close()
+    overview = pl.DataFrame({"stat": [k for k, _ in profile_to_rows(profile)],
+                             "value": [v for _, v in profile_to_rows(profile)]})
+    heroes = pl.DataFrame([{"hero": cat.hero_name(h.hero_id), "games": h.games, "wins": h.wins,
+                            "win_rate": round(h.winrate, 3), "kills": round(h.kills, 2), "deaths": round(h.deaths, 2),
+                            "assists": round(h.assists, 2), "souls_per_min": round(h.souls_per_min, 1)}
+                           for h in profile.heroes])
+    match_df = pl.DataFrame(matches) if matches else pl.DataFrame()
+    with xlsxwriter.Workbook(str(dest)) as wb:
+        for name, df in (("Overview", overview), ("Heroes", heroes), ("Matches", match_df)):
+            if df.height == 0:
+                wb.add_worksheet(name)
+                continue
+            df.write_excel(wb, worksheet=name, autofit=True, table_style="Table Style Medium 2")
+    return dest
+
+
 def export_match_xlsx(match_id: int, dest: Path, *, db: Database | None = None) -> Path:
     import xlsxwriter
 

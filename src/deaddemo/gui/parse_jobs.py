@@ -23,15 +23,15 @@ def start_parse(ctx: AppContext, demo: DemoRow) -> None:
             ctx.demos.set_status(demo.id, "error", error=f"store: {exc}")
             ctx.status(f"Failed to store match {demo.match_id}: {exc}", 10000)
         else:
-            ctx.status(f"Parsed match {result.match_id}")
+            ctx.status(f"Analyzed match {result.match_id}")
         ctx.events.demos_changed.emit()
         ctx.events.matches_changed.emit()
 
     def failed(err: str) -> None:
         ctx.demos.set_status(demo.id, "error", error=err.splitlines()[0][:300])
-        ctx.status(f"Parse failed for {demo.path}: {err.splitlines()[0]}", 15000)
+        ctx.status(f"Analysis failed for {demo.path}: {err.splitlines()[0]}", 15000)
         ctx.events.demos_changed.emit()
 
     ctx.jobs.submit_process(name, parse_demo, demo.path, str(out_dir), datasets,
                             on_finished=done, on_failed=failed)
-    ctx.status(f"Parsing {demo.path} …")
+    ctx.status(f"Analyzing {demo.path} …")

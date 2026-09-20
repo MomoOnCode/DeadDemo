@@ -41,6 +41,7 @@ def store_result(db: Database, demo: DemoRow, result: ParseResult) -> None:
     matches.store_parse_result(
         match_row=result.match_row, players=result.players, kills=result.kills,
         item_purchases=result.item_purchases, objective_events=result.objective_events,
+        player_extras=result.player_extras,
     )
     demos = DemoRepo(db)
     demos.set_status(demo.id, "parsed", parser_version=PARSER_VERSION)

@@ -205,6 +205,7 @@ class MatchRepo:
         kills: list[dict[str, Any]],
         item_purchases: list[dict[str, Any]],
         objective_events: list[dict[str, Any]],
+        player_extras: list[dict[str, Any]] | None = None,
     ) -> None:
         match_id = int(match_row["match_id"])
         cols = [f.name for f in fields(MatchRow)]
@@ -249,6 +250,22 @@ class MatchRepo:
                     for o in objective_events
                 ],
             )
+        if player_extras:
+            self.store_extras(match_id, player_extras)
+
+    def store_extras(self, match_id: int, rows: list[dict[str, Any]]) -> None:
+        from deaddemo.core.stats.extras import EXTRA_COLUMNS  # local import: extras depends on repos
+
+        cols = ["match_id", "hero_id", *EXTRA_COLUMNS]
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM match_player_extras WHERE match_id=?", (match_id,))
+            conn.executemany(
+                f"INSERT INTO match_player_extras({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                [[match_id, r["hero_id"], *[r.get(c, 0) for c in EXTRA_COLUMNS]] for r in rows],
+            )
+
+    def extras(self, match_id: int) -> list[sqlite3.Row]:
+        return self.db.conn.execute("SELECT * FROM match_player_extras WHERE match_id=?", (match_id,)).fetchall()
 
     def set_has_ticks(self, match_id: int, has_ticks: bool) -> None:
         with self.db.transaction() as conn:
@@ -487,6 +504,24 @@ class TagRepo:
             conn.execute(
                 "INSERT OR REPLACE INTO annotations(match_id, comment, updated_at) VALUES (?,?,?)",
                 (match_id, comment, utcnow_iso()),
+            )
+
+
+class PlayerNotesRepo:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def get(self, steam_id: int) -> tuple[list[str], str]:
+        row = self.db.conn.execute("SELECT tags, comment FROM player_notes WHERE steam_id=?", (steam_id,)).fetchone()
+        if not row:
+            return [], ""
+        return json.loads(row["tags"] or "[]"), row["comment"] or ""
+
+    def set(self, steam_id: int, tags: list[str], comment: str) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO player_notes(steam_id, tags, comment, updated_at) VALUES (?,?,?,?)",
+                (steam_id, json.dumps(tags), comment, utcnow_iso()),
             )
 
 

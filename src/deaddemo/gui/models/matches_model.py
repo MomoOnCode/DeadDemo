@@ -33,7 +33,7 @@ class MatchListRow:
     @property
     def state(self) -> str:
         if self.parsed:
-            return "parsed"
+            return "analyzed"
         if self.local:
             return "local"
         if self.downloading:

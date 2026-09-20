@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         ev.status_message.connect(lambda m, t: self.statusBar().showMessage(m, t))
         ev.open_match.connect(self.open_match)
         ev.open_viewer.connect(self.open_viewer)
+        ev.open_player.connect(self.open_player)
         ev.settings_changed.connect(self._update_version_label)
         self.ctx.jobs.job_started.connect(self._jobs_changed)
         self.ctx.jobs.job_finished.connect(self._jobs_changed)
@@ -82,6 +83,11 @@ class MainWindow(QMainWindow):
         self.match_detail = MatchDetailPage(self.ctx)
         self.match_detail.back_requested.connect(lambda: self.sidebar.setCurrentRow(self._last_row))
         self.stack.addWidget(self.match_detail)
+        from deaddemo.gui.pages.player_page import PlayerPage
+
+        self.player_page = PlayerPage(self.ctx)
+        self.player_page.back_requested.connect(lambda: self.sidebar.setCurrentRow(self._last_row))
+        self.stack.addWidget(self.player_page)
         self._last_row = 0
 
     def _switch_page(self, row: int) -> None:
@@ -96,6 +102,13 @@ class MainWindow(QMainWindow):
         self.sidebar.clearSelection()
         self.sidebar.blockSignals(False)
         self.stack.setCurrentWidget(self.match_detail)
+
+    def open_player(self, steam_id) -> None:
+        self.player_page.load_player(int(steam_id))
+        self.sidebar.blockSignals(True)
+        self.sidebar.clearSelection()
+        self.sidebar.blockSignals(False)
+        self.stack.setCurrentWidget(self.player_page)
 
     def open_viewer(self, match_id: int) -> None:
         self.pages["Viewer"].load_match(match_id)
@@ -127,6 +140,6 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() == Qt.Key.Key_Escape and self.stack.currentWidget() is self.match_detail:
+        if event.key() == Qt.Key.Key_Escape and self.stack.currentWidget() in (self.match_detail, self.player_page):
             self.sidebar.setCurrentRow(self._last_row)
         super().keyPressEvent(event)

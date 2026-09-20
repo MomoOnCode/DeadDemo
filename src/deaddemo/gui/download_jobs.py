@@ -21,7 +21,7 @@ def start_download(ctx: AppContext, match_id: int) -> bool:
         ctx.status(f"Match {match_id} is already in {dest_dir}")
         return False
     try:
-        url = demo_url_for(match_id, db=ctx.db)
+        url = demo_url_for(match_id, db=ctx.db, use_gc=ctx.settings.use_steam_gc)
     except ReplayUnavailable as exc:
         ctx.status(str(exc), 12000)
         return False

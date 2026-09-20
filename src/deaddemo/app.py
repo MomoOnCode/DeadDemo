@@ -8,6 +8,9 @@ import sys
 
 def main() -> int:
     multiprocessing.freeze_support()
+    from deaddemo.core import secrets
+
+    secrets.load_dotenv()
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 

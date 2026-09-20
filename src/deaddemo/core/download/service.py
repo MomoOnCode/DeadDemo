@@ -33,7 +33,7 @@ def download_match(
     try:
         dest_dir = dest_dir or Settings.load().resolved_download_dir()
         dest = dest_dir / demo_filename(match_id)
-        url = demo_url_for(match_id, db=db, client=client)
+        url = demo_url_for(match_id, db=db, client=client, use_gc=Settings.load().use_steam_gc)
         repo = DownloadRepo(db)
         row = repo.create(match_id, url, str(dest))
         repo.set_status(row.id, "running")

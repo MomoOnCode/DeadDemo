@@ -177,7 +177,7 @@ class GraphsWidget(QWidget):
             self.chart.y_format = fmt_souls
         else:
             self.chart.y_format = lambda v: f"{v:,.0f}"
-        self.chart.empty_text = ("No data for this graph. Reparse the demo to store the healing dataset."
+        self.chart.empty_text = ("No data for this graph. Re-analyze the demo to store the healing dataset."
                                  if spec.id.startswith("healing") else "No data for this graph")
         series: list[Series] = []
         self.hero_list.blockSignals(True)

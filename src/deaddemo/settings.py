@@ -24,6 +24,7 @@ class Settings:
     viewer_tick_step: int = 4
     auto_parse_downloads: bool = True
     auto_refresh_history: bool = True
+    use_steam_gc: bool = True  # ask the Steam Game Coordinator for salts deadlock-api lacks (needs login)
 
     def resolved_download_dir(self) -> Path:
         return Path(self.download_dir) if self.download_dir else paths.default_download_dir()

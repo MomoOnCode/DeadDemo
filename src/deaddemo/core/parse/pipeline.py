@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-PARSER_VERSION = "2"  # 2: self_healing column, healing dataset stored by default
+PARSER_VERSION = "3"  # 3: per-player extras (headshots, multi-kills, teamfights, ...)
 
 # Always loaded; the first three feed SQLite summary tables, the rest are written as Parquet.
 CORE_DATASETS = ("players", "kills", "item_purchases", "player_ticks", "damage", "objectives")
@@ -38,6 +38,7 @@ class ParseResult:
     kills: list[dict[str, Any]] = field(default_factory=list)
     item_purchases: list[dict[str, Any]] = field(default_factory=list)
     objective_events: list[dict[str, Any]] = field(default_factory=list)
+    player_extras: list[dict[str, Any]] = field(default_factory=list)
     parquet_dir: str = ""
     manifest: dict[str, Any] = field(default_factory=dict)
     boon_version: str = ""
@@ -140,10 +141,29 @@ def parse_demo(dem_path: str, out_dir: str, extra_datasets: tuple[str, ...] = ()
     items = tables.item_rows(demo.item_purchases, start_tick, tick_rate)
     obj_events = tables.objective_event_rows(objectives, start_tick, tick_rate)
 
+    from deaddemo.core.stats.extras import compute_extras
+
+    teamfights_df = None
+    if "teamfights" in manifest["datasets"]:
+        try:
+            teamfights_df = pl.read_parquet(out / "teamfights.parquet")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"teamfights: {exc}")
+    try:
+        extras = compute_extras(
+            hero_ids=[int(p["hero_id"]) for p in players],
+            team_of={int(p["hero_id"]): int(p["team_num"] or 0) for p in players},
+            ticks=ticks.select(tick_cols).with_columns(match_seconds_expr()), damage=dmg, kills=kills,
+            teamfights=teamfights_df,
+        )
+    except Exception as exc:  # noqa: BLE001 - extras are optional
+        warnings.append(f"extras: {type(exc).__name__}: {exc}")
+        extras = []
+
     return ParseResult(
         match_id=match_id, match_row=match_row, players=players, kills=kills, item_purchases=items,
-        objective_events=obj_events, parquet_dir=str(out), manifest=manifest, boon_version=boon_version(),
-        warnings=warnings,
+        objective_events=obj_events, player_extras=extras, parquet_dir=str(out), manifest=manifest,
+        boon_version=boon_version(), warnings=warnings,
     )
 
 

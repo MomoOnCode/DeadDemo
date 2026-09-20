@@ -106,6 +106,8 @@ class MatchDetailPage(QWidget):
             table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
             table.horizontalHeader().setStretchLastSection(True)
             table.setMaximumHeight(220)
+            table.doubleClicked.connect(lambda idx, m=model: self._open_player(m.row_at(idx)))
+            table.setToolTip("Double-click a player for their profile")
             col.addWidget(table)
             bl.addLayout(col)
             self.board_models[team] = model
@@ -198,14 +200,14 @@ class MatchDetailPage(QWidget):
     def load_match(self, match_id: int) -> None:
         self.match = self.ctx.matches.get(match_id)
         if self.match is None:
-            self.header.setText(f"Match {match_id} is not parsed")
+            self.header.setText(f"Match {match_id} has not been analyzed yet")
             return
         self.players = self.ctx.matches.players(match_id)
         m = self.match
         winner = team_name(m.winning_team) if m.winning_team else "?"
         self.header.setText(
             f"Match {m.match_id} — {m.map_name} — {fmt_clock(m.regulation_seconds)} — {winner} won"
-            f" — build {m.build} — parsed with boon {m.boon_version}"
+            f" — build {m.build} — analyzed with boon {m.boon_version}"
         )
         for team, model in self.board_models.items():
             model.set_rows([p for p in self.players if p.team_num == team])
@@ -266,6 +268,10 @@ class MatchDetailPage(QWidget):
             t = fmt_clock(r.get("match_seconds"))
             lines.append(f"[{t}] ({r.get('chat_type')}) {cat.hero_name(r.get('hero_id'))}: {r.get('text')}")
         self.chat_view.setPlainText("\n".join(lines) or "No chat in this demo (or 'chat' dataset not stored).")
+
+    def _open_player(self, row: MatchPlayerRow | None) -> None:
+        if row is not None and row.steam_id:
+            self.ctx.events.open_player.emit(int(row.steam_id))
 
     def _save_notes(self) -> None:
         if not self.match:

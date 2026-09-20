@@ -44,7 +44,7 @@ class MatchesPage(QWidget):
         self.days.setValue(7)
         self.days.setSuffix(" days")
         self.btn_open = QPushButton("Open match")
-        self.btn_parse = QPushButton("Parse local")
+        self.btn_parse = QPushButton("Analyze local")
         self.search = QLineEdit()
         self.search.setPlaceholderText("Filter…")
         for w in (self.btn_refresh, self.btn_force, self.btn_download, self.btn_download_recent, self.days,
@@ -102,7 +102,7 @@ class MatchesPage(QWidget):
         self.table.resizeColumnsToContents()
         wins = sum(1 for r in rows if r.won)
         self.info.setText(f"{acct.persona_name}: {len(rows)} matches, {wins} wins, "
-                          f"{sum(1 for r in rows if r.local)} local, {sum(1 for r in rows if r.parsed)} parsed")
+                          f"{sum(1 for r in rows if r.local)} local, {sum(1 for r in rows if r.parsed)} analyzed")
 
     def selected(self) -> list[MatchListRow]:
         out = []
@@ -159,35 +159,25 @@ class MatchesPage(QWidget):
         self._download_rows(rows)
 
     def _download_rows(self, rows: list[MatchListRow]) -> None:
-        """Resolve salts in a worker first (network), then queue downloads on the main thread."""
-        from deaddemo.core.api.service import resolve_salts
+        """Resolve salts in a worker first (network / Steam GC), then queue downloads on the main thread."""
+        from deaddemo.core.api.service import resolve_salts_any
         from deaddemo.gui.download_jobs import start_download
 
         ids = [r.match_id for r in rows]
         db = self.ctx.db
+        use_gc = self.ctx.settings.use_steam_gc
 
         def work(progress, cancel):
-            ok, missing = [], []
-            for i, mid in enumerate(ids):
-                if cancel.is_set():
-                    break
-                progress(i, len(ids), f"Resolving replay {mid}")
-                try:
-                    s = resolve_salts(mid, db=db)
-                    if not s.demo_url:
-                        s = resolve_salts(mid, db=db, force=True)
-                    (ok if s.demo_url else missing).append(mid)
-                except Exception:  # noqa: BLE001
-                    missing.append(mid)
-            return ok, missing
+            return resolve_salts_any(ids, db=db, use_gc=use_gc, progress=progress)
 
         def done(result):
-            ok, missing = result
-            started = sum(1 for mid in ok if start_download(self.ctx, mid))
+            found, missing = result
+            started = sum(1 for mid in found if start_download(self.ctx, mid))
             msg = f"Queued {started} download(s)"
             if missing:
-                msg += f"; no replay available for {len(missing)} match(es): " + ", ".join(map(str, missing[:5]))
-            self.ctx.status(msg, 12000)
+                reasons = sorted(set(missing.values()))
+                msg += f"; {len(missing)} unavailable ({'; '.join(reasons)[:160]})"
+            self.ctx.status(msg, 15000)
             self.ctx.events.history_changed.emit()
 
         self.ctx.jobs.submit("resolve-salts", work, on_finished=done,

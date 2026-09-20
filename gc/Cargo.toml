@@ -1,0 +1,28 @@
+[package]
+name = "deaddemo-gc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Steam Game Coordinator helper for DeadDemo: fetches Deadlock replay salts for your own matches"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "deaddemo-gc"
+path = "src/main.rs"
+
+[dependencies]
+steam-vent = "0.5"
+steam-vent-proto-deadlock = "0.1"
+steam-vent-proto-common = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-std", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 2
+strip = true
+lto = "thin"

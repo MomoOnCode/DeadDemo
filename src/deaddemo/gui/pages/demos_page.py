@@ -41,8 +41,8 @@ class DemosPage(QWidget):
         layout = QVBoxLayout(self)
         bar = QHBoxLayout()
         self.btn_scan = QPushButton("Rescan")
-        self.btn_parse = QPushButton("Parse")
-        self.btn_reparse = QPushButton("Reparse")
+        self.btn_parse = QPushButton("Analyze")
+        self.btn_reparse = QPushButton("Re-analyze")
         self.btn_open = QPushButton("Open match")
         self.btn_folder = QPushButton("Show in folder")
         self.btn_copy = QPushButton("Copy playdemo command")
@@ -154,7 +154,7 @@ class DemosPage(QWidget):
     def _parse_selected(self, force: bool) -> None:
         rows = [r for r in self.selected() if r.status in ("found", "parsed", "error")]
         if not rows:
-            self.ctx.status("Select one or more demos to parse")
+            self.ctx.status("Select one or more demos to analyze")
             return
         from deaddemo.gui.parse_jobs import start_parse
 
@@ -167,7 +167,7 @@ class DemosPage(QWidget):
         rows = self.selected()
         if rows and rows[0].match_id:
             if self.ctx.matches.get(rows[0].match_id) is None:
-                self.ctx.status("Parse this demo first to view match details")
+                self.ctx.status("Analyze this demo first to view match details")
                 return
             self.ctx.events.open_match.emit(rows[0].match_id)
 

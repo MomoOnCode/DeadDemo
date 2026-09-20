@@ -49,12 +49,13 @@ class DeadlockApiClient:
         self.min_interval_s = min_interval_s
         self._lock = threading.Lock()
         self._last_request = 0.0
-        self._http = httpx.Client(
-            base_url=self.base_url,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-            timeout=timeout_s,
-            follow_redirects=True,
-        )
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        from deaddemo.core import secrets
+
+        api_key = secrets.api_key()  # optional; raises the API's rate limits. Never logged or stored.
+        if api_key:
+            headers["X-API-KEY"] = api_key
+        self._http = httpx.Client(base_url=self.base_url, headers=headers, timeout=timeout_s, follow_redirects=True)
 
     def close(self) -> None:
         self._http.close()

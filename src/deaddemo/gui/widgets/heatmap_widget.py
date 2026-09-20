@@ -136,7 +136,38 @@ class HeatmapWidget(QWidget):
         self.blur.sliderReleased.connect(self.render)
         self.hero_list.itemChanged.connect(lambda _i: self.render())
 
+    def load_player(self, steam_id: int, matches: list[tuple[MatchRow, MatchPlayerRow]]) -> None:
+        """Aggregate one player's positions/kills across several parsed matches."""
+        if not matches:
+            return
+        self.player_matches = matches
+        self.match, me = matches[0]
+        self.players = [me]
+        self.assets = load_map_assets(self.ctx, self.match.map_name or "unknown")
+        self.canvas.base = self.assets.pixmap
+        cat = catalog()
+        self.hero_list.blockSignals(True)
+        self.hero_list.clear()
+        item = QListWidgetItem(f"{me.player_name} — {len(matches)} matches, all heroes")
+        item.setData(Qt.ItemDataRole.UserRole, -1)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        self.hero_list.addItem(item)
+        self.hero_list.blockSignals(False)
+        total = int(max((m.regulation_seconds or 0) for m, _ in matches))
+        for s in (self.t_from, self.t_to):
+            s.blockSignals(True)
+            s.setRange(0, max(1, total))
+        self.t_from.setValue(0)
+        self.t_to.setValue(max(1, total))
+        for s in (self.t_from, self.t_to):
+            s.blockSignals(False)
+        self._time_changed()
+        self.info.setText(f"{cat.hero_name(me.hero_id)} and others · {len(matches)} matches")
+        self.render()
+
     def load_match(self, match: MatchRow, players: list[MatchPlayerRow]) -> None:
+        self.player_matches = None
         self.match = match
         self.players = players
         self.assets = load_map_assets(self.ctx, match.map_name or "unknown")
@@ -182,20 +213,30 @@ class HeatmapWidget(QWidget):
         return [self.hero_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.hero_list.count())
                 if self.hero_list.item(i).checkState() == Qt.CheckState.Checked]
 
+    def _collect(self, match: MatchRow, heroes: list[int], z, mode: int) -> np.ndarray:
+        if mode == 0:
+            return hm.positions(match, hero_ids=heroes or [-1], alive_only=self.alive_only.isChecked(),
+                                t_from=float(self.t_from.value()), t_to=float(self.t_to.value()), z_range=z)
+        kills = [dict(r) for r in self.ctx.matches.kills(match.match_id)
+                 if self.t_from.value() <= (r["match_seconds"] or 0) <= self.t_to.value()]
+        return hm.kill_positions(match, kills, victims=heroes if mode == 1 else None,
+                                 attackers=heroes if mode == 2 else None)
+
     def render(self) -> None:
         if not self.match or not self.assets:
             return
         heroes = self.selected_heroes()
         z = {1: (-10000.0, 0.0), 2: (0.0, 700.0), 3: (700.0, 100000.0)}.get(self.z_band.currentIndex())
         mode = self.mode.currentIndex()
-        if mode == 0:
-            pts = hm.positions(self.match, hero_ids=heroes or [-1], alive_only=self.alive_only.isChecked(),
-                               t_from=float(self.t_from.value()), t_to=float(self.t_to.value()), z_range=z)
+        player_matches = getattr(self, "player_matches", None)
+        if player_matches:
+            if -1 not in heroes:
+                pts = np.zeros((0, 3), dtype=np.float32)
+            else:
+                parts = [self._collect(m, [me.hero_id], z, mode) for m, me in player_matches]
+                pts = np.concatenate(parts) if parts else np.zeros((0, 3), dtype=np.float32)
         else:
-            kills = [dict(r) for r in self.ctx.matches.kills(self.match.match_id)
-                     if self.t_from.value() <= (r["match_seconds"] or 0) <= self.t_to.value()]
-            pts = hm.kill_positions(self.match, kills, victims=heroes if mode == 1 else None,
-                                    attackers=heroes if mode == 2 else None)
+            pts = self._collect(self.match, heroes, z, mode)
         size = (self.assets.pixmap.width(), self.assets.pixmap.height())
         sigma = self.blur.value() / 10.0
         bins = 4 if mode == 0 else 10
