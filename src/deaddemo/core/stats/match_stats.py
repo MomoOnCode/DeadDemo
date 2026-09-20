@@ -44,11 +44,28 @@ def networth_timeline(match: MatchRow, every_s: float = 20.0) -> pl.DataFrame:
     lf = scan(match, "player_ticks")
     if lf is None:
         return pl.DataFrame({"match_seconds": [], "hero_id": [], "souls": []})
-    step = max(1, int(every_s * (match.tick_rate or 64)))
-    return (
-        lf.filter((pl.col("tick") % step) == 0)
-        .select(["match_seconds", "hero_id", "souls"])
+    cols = lf.collect_schema().names()
+    souls = pl.col("gold_net_worth") if "gold_net_worth" in cols else pl.col("souls")
+    # Bucket by time, keep the last sample per hero per bucket, then forward-fill across a full
+    # hero x bucket grid: dead heroes have no rows at all, and a gap must not drag team totals down.
+    sampled = (
+        lf.select([pl.col("match_seconds"), pl.col("hero_id"), souls.alias("souls"), pl.col("tick")])
+        .with_columns(((pl.col("match_seconds") / every_s).floor() * every_s).alias("bucket"))
+        .sort("tick")
+        .group_by(["hero_id", "bucket"])
+        .agg(pl.col("souls").last())
         .collect()
+    )
+    if sampled.height == 0:
+        return pl.DataFrame({"match_seconds": [], "hero_id": [], "souls": []})
+    heroes = sampled.select("hero_id").unique()
+    buckets = sampled.select("bucket").unique()
+    grid = heroes.join(buckets, how="cross")
+    return (
+        grid.join(sampled, on=["hero_id", "bucket"], how="left")
+        .sort(["hero_id", "bucket"])
+        .with_columns(pl.col("souls").fill_null(strategy="forward").over("hero_id").fill_null(0))
+        .rename({"bucket": "match_seconds"})
         .sort(["hero_id", "match_seconds"])
     )
 

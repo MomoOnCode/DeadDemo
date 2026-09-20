@@ -141,7 +141,6 @@ class MatchesPage(QWidget):
                              on_failed=lambda e: self.ctx.status(f"History refresh failed: {e.splitlines()[0]}", 12000))
 
     def _download_selected(self) -> None:
-        from deaddemo.gui.download_jobs import start_download
 
         rows = [r for r in self.selected() if not r.local and not r.downloading]
         if not rows:

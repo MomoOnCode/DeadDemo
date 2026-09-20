@@ -111,11 +111,11 @@ class MainWindow(QMainWindow):
             self.job_label.setText("")
 
     def _update_version_label(self) -> None:
-        import boon
+        from deaddemo.core.parse.pipeline import boon_version
 
         build = self.ctx.install.client_build
         self.statusBar().showMessage(
-            f"boon {boon.version() if callable(getattr(boon, 'version', None)) else '?'} | "
+            f"boon {boon_version()} | "
             f"Deadlock client build {build or '?'} | account "
             f"{self.ctx.install.account.persona_name if self.ctx.install.account else 'unknown'}",
             0,

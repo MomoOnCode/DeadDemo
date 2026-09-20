@@ -3,16 +3,16 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QHBoxLayout,
     QHeaderView,
     QPushButton,
+    QStyle,
     QStyledItemDelegate,
     QStyleOptionProgressBar,
-    QStyle,
     QTableView,
     QVBoxLayout,
     QWidget,
-    QApplication,
 )
 
 from deaddemo.core.db.repos import DownloadRow

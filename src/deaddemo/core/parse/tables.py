@@ -21,9 +21,11 @@ def scoreboard_rows(demo, ticks: pl.DataFrame, winning_team: int | None) -> list
     players = demo.players
     last = ticks.filter(pl.col("tick") == pl.col("tick").max().over("hero_id")).unique(subset=["hero_id"],
                                                                                         keep="last")
-    stat_cols = [c for c in ("kills", "deaths", "assists", "last_hits", "denies", "souls", "hero_damage", "level")
+    stat_cols = [c for c in ("kills", "deaths", "assists", "last_hits", "denies", "hero_damage", "level")
                  if c in last.columns]
-    last = last.select(["hero_id", *stat_cols])
+    # "souls" in the summary tables means net worth (what the in-game scoreboard and the API show).
+    souls_col = "gold_net_worth" if "gold_net_worth" in last.columns else "souls"
+    last = last.select(["hero_id", *stat_cols, pl.col(souls_col).alias("souls")])
     joined = players.join(last, on="hero_id", how="left")
     kp: dict[int, float] = {}
     td: dict[int, float] = {}

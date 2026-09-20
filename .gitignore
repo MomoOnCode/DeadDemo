@@ -11,3 +11,13 @@ build/
 *.dem.bz2
 *.parquet
 /deaddemo-data/
+
+# secrets: never commit credentials, tokens or keys
+.env
+.env.*
+!.env.example
+*.token
+*.secret
+secrets/
+gc/target/
+gc/Cargo.lock.bak

@@ -208,8 +208,9 @@ class DemosPage(QWidget):
         if not partials:
             return
         names = "\n".join(Path(r.path).name for r in partials)
-        if QMessageBox.question(self, "Delete partial downloads",
-                                f"Delete {len(partials)} partial file(s)?\n\n{names}") != QMessageBox.StandardButton.Yes:
+        answer = QMessageBox.question(self, "Delete partial downloads",
+                                      f"Delete {len(partials)} partial file(s)?\n\n{names}")
+        if answer != QMessageBox.StandardButton.Yes:
             return
         for r in partials:
             try:

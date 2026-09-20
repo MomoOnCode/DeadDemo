@@ -109,19 +109,36 @@ class Item:
     class_name: str = ""
     type: str = ""
     image: str | None = None
+    shop_image: str | None = None
     item_slot_type: str | None = None
     item_tier: int | None = None
     cost: int | None = None
+    is_active_item: bool = False
+    component_items: list[str] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Item:
         d = _pick(cls, data)
+        d.pop("raw", None)
         if d.get("cost") is not None:
             try:
                 d["cost"] = int(d["cost"])
             except (TypeError, ValueError):
                 d["cost"] = None
-        return cls(**d)
+        if d.get("item_tier") is not None:
+            try:
+                d["item_tier"] = int(d["item_tier"])
+            except (TypeError, ValueError):
+                d["item_tier"] = None
+        d["component_items"] = [str(c) for c in (data.get("component_items") or [])]
+        d["is_active_item"] = bool(data.get("is_active_item"))
+        d["name"] = str(data.get("name") or data.get("class_name") or "")
+        return cls(**d, raw=data)
+
+    @property
+    def icon_url(self) -> str | None:
+        return self.shop_image or self.image
 
 
 @dataclass

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from deaddemo import paths
 
-DEFAULT_EXTRA_DATASETS: tuple[str, ...] = ("world_ticks", "teamfights", "chat")
+DEFAULT_EXTRA_DATASETS: tuple[str, ...] = ("healing", "world_ticks", "teamfights", "chat")
 
 
 @dataclass

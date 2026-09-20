@@ -1,4 +1,9 @@
-"""Stream a ``.dem.bz2`` replay from Valve's servers straight into a decompressed ``.dem``."""
+"""Stream a replay from Valve's servers straight into a decompressed ``.dem``.
+
+Valve names the files ``.dem.bz2`` but (as of September 2026) serves **zstd** frames; older
+files were genuinely bzip2. The container is sniffed from the first bytes, so all of zstd,
+bzip2 and raw demos are accepted.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,8 @@ from deaddemo.core.replays.scanner import DEMO_MAGIC
 
 CHUNK = 1 << 20
 PART_SUFFIX = ".deaddemo-part"
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+BZIP2_MAGIC = b"BZh"
 
 
 class DownloadCancelled(Exception):
@@ -33,6 +40,24 @@ class DownloadProgress:
 
 
 ProgressFn = Callable[[DownloadProgress], None]
+
+
+class _Passthrough:
+    def decompress(self, data: bytes) -> bytes:
+        return data
+
+
+def make_decompressor(head: bytes):
+    """Pick a streaming decompressor from the first bytes of the payload."""
+    if head.startswith(ZSTD_MAGIC):
+        import zstandard
+
+        return zstandard.ZstdDecompressor().decompressobj()
+    if head.startswith(BZIP2_MAGIC):
+        return bz2.BZ2Decompressor()
+    if head.startswith(DEMO_MAGIC):
+        return _Passthrough()
+    raise DownloadError(f"server response is not zstd, bzip2 or a Source 2 demo (starts with {head[:8]!r})")
 
 
 def download_demo(
@@ -57,32 +82,33 @@ def download_demo(
             if resp.status_code != 200:
                 raise DownloadError(f"HTTP {resp.status_code} for {url}")
             total = int(resp.headers.get("Content-Length") or 0) or None
-            decomp: bz2.BZ2Decompressor | None = None
-            first = True
+            decomp = None
             with part.open("wb") as out:
                 for chunk in resp.iter_bytes(CHUNK):
                     if cancel is not None and cancel.is_set():
                         raise DownloadCancelled()
                     if not chunk:
                         continue
-                    if first:
-                        first = False
-                        if chunk[:3] == b"BZh":
-                            decomp = bz2.BZ2Decompressor()
-                        elif chunk[: len(DEMO_MAGIC)] != DEMO_MAGIC:
-                            raise DownloadError("server response is neither bzip2 nor a Source 2 demo")
+                    if decomp is None:
+                        decomp = make_decompressor(chunk)
                     downloaded += len(chunk)
-                    data = decomp.decompress(chunk) if decomp else chunk
+                    data = decomp.decompress(chunk)
                     if data:
                         out.write(data)
                         written += len(data)
                     if progress:
                         progress(DownloadProgress(downloaded, total, written))
+                flush = getattr(decomp, "flush", None)
+                if callable(flush):
+                    tail = flush()
+                    if tail:
+                        out.write(tail)
+                        written += len(tail)
                 out.flush()
                 os.fsync(out.fileno())
         with part.open("rb") as fh:
             if fh.read(len(DEMO_MAGIC)) != DEMO_MAGIC:
-                raise DownloadError("downloaded file is not a valid demo (bad magic)")
+                raise DownloadError("downloaded file is not a valid demo (bad magic after decompression)")
         os.replace(part, dest)
         return dest
     except BaseException:

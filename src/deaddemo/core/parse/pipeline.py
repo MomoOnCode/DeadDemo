@@ -12,15 +12,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-PARSER_VERSION = "1"
+PARSER_VERSION = "2"  # 2: self_healing column, healing dataset stored by default
 
 # Always loaded; the first three feed SQLite summary tables, the rest are written as Parquet.
 CORE_DATASETS = ("players", "kills", "item_purchases", "player_ticks", "damage", "objectives")
 
 PLAYER_TICK_COLS = [
     "tick", "hero_id", "x", "y", "z", "yaw", "health", "max_health", "barrier", "is_alive", "lifestate",
-    "level", "souls", "spent_souls", "kills", "deaths", "assists", "last_hits", "denies", "hero_damage",
-    "hero_healing", "objective_damage", "has_ultimate_trained", "has_rejuvenator", "kill_streak",
+    "level", "souls", "spent_souls", "gold_net_worth", "kills", "deaths", "assists", "last_hits", "denies",
+    "hero_damage", "hero_healing", "self_healing", "objective_damage", "has_ultimate_trained", "has_rejuvenator",
+    "kill_streak",
 ]
 
 DAMAGE_COLS = [
@@ -64,8 +65,9 @@ def parse_demo(dem_path: str, out_dir: str, extra_datasets: tuple[str, ...] = ()
     available = set(Demo.available_datasets())
     warnings: list[str] = []
     extras = [d for d in extra_datasets if d in available and d not in CORE_DATASETS]
+    derived = [d for d in extra_datasets if d not in available and callable(getattr(demo, d, None))]
     for d in extra_datasets:
-        if d not in available:
+        if d not in available and d not in derived:
             warnings.append(f"dataset {d!r} not available in boon {boon_version()}")
     demo.load(*[d for d in CORE_DATASETS if d != "players"], *extras)
 
@@ -97,9 +99,11 @@ def parse_demo(dem_path: str, out_dir: str, extra_datasets: tuple[str, ...] = ()
     objectives = demo.objectives
     write("objectives", objectives.with_columns(match_seconds_expr()))
 
-    for name in extras:
+    for name in [*extras, *derived]:
         try:
             df = getattr(demo, name)
+            if callable(df):
+                df = df()
             if isinstance(df, pl.DataFrame):
                 if "tick" in df.columns:
                     df = df.with_columns(match_seconds_expr())
@@ -111,10 +115,12 @@ def parse_demo(dem_path: str, out_dir: str, extra_datasets: tuple[str, ...] = ()
 
     # -- summary rows ------------------------------------------------------------------
     winning_team = int(demo.winning_team_num) if demo.winning_team_num is not None else None
+    from deaddemo.core.parse.header import client_version_from_header
+
     match_row = {
         "match_id": match_id,
         "map_name": demo.map_name,
-        "build": int(demo.build) if demo.build is not None else None,
+        "build": client_version_from_header(Path(dem_path)) or (int(demo.build) if demo.build is not None else None),
         "game_mode": int(demo.game_mode) if demo.game_mode is not None else None,
         "tick_rate": tick_rate,
         "total_ticks": int(demo.total_ticks or 0),

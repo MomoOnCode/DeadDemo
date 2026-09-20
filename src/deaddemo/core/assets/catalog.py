@@ -14,12 +14,17 @@ class Catalog:
         self._hero_names: dict[int, str] = {}
         self._heroes: dict[int, Hero] = {}
         self._items: dict[int, Item] = {}
+        self._items_by_class: dict[str, Item] = {}
         self._map: MapInfo | None = None
         self._api_loaded = False
+        self._ability_class: dict[int, str] = {}
+        self._ability_display: dict[str, str] = {}
         try:
             import boon
 
             self._hero_names = {int(k): str(v) for k, v in boon.hero_names().items()}
+            self._ability_class = {int(k): str(v) for k, v in boon.ability_names().items()}
+            self._ability_display = {str(k): str(v) for k, v in boon.ability_display_names().items()}
         except Exception:  # noqa: BLE001 - boon missing or API changed; API fallback still works
             pass
 
@@ -42,11 +47,16 @@ class Catalog:
             return False
         self._heroes = {h.id: h for h in heroes}
         self._items = {i.id: i for i in items}
+        self._items_by_class = {i.class_name: i for i in items if i.class_name}
         self._map = map_info
         for h in heroes:
             self._hero_names.setdefault(h.id, h.name)
         self._api_loaded = True
         return True
+
+    @property
+    def api_loaded(self) -> bool:
+        return self._api_loaded
 
     # -- lookups -------------------------------------------------------------------
     def hero_name(self, hero_id: int | None) -> str:
@@ -57,14 +67,41 @@ class Catalog:
     def hero(self, hero_id: int) -> Hero | None:
         return self._heroes.get(hero_id)
 
-    def item(self, item_id: int) -> Item | None:
-        return self._items.get(item_id)
+    def item(self, item_id: int | None) -> Item | None:
+        return self._items.get(int(item_id)) if item_id is not None else None
+
+    def item_by_class(self, class_name: str) -> Item | None:
+        return self._items_by_class.get(class_name)
 
     def item_name(self, item_id: int | None) -> str:
         if item_id is None:
             return ""
         it = self._items.get(int(item_id))
-        return it.name if it else f"Item {item_id}"
+        if it:
+            return it.name
+        return self.ability_name(item_id)
+
+    def ability_name(self, ability_id: int | None) -> str:
+        """Human name for an ability / item / weapon id from a damage or healing event."""
+        if ability_id is None:
+            return ""
+        aid = int(ability_id)
+        if aid == 0:
+            return "Unattributed"
+        it = self._items.get(aid)
+        cls = self._ability_class.get(aid) or (it.class_name if it else "")
+        if cls in self._ability_display:
+            return self._ability_display[cls]
+        if it and it.name and it.name != it.class_name:
+            return it.name
+        if cls.startswith("citadel_weapon_"):
+            return "Weapon"
+        if cls.startswith("citadel_ability_melee") or cls.startswith("ability_melee"):
+            return "Melee"
+        if cls:
+            return cls.removeprefix("citadel_ability_").removeprefix("ability_").removeprefix("upgrade_") \
+                .replace("_", " ").title()
+        return f"Ability {aid}"
 
     def map_info(self) -> MapInfo | None:
         return self._map
@@ -78,6 +115,15 @@ class Catalog:
             return None
         try:
             return self.client.fetch_image(url)
+        except ApiError:
+            return None
+
+    def item_image(self, item_id: int) -> Path | None:
+        it = self._items.get(item_id)
+        if not it or not it.icon_url:
+            return None
+        try:
+            return self.client.fetch_image(it.icon_url)
         except ApiError:
             return None
 
