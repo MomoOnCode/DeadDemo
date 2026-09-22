@@ -14,6 +14,8 @@ dependencies = [
     "platformdirs>=4",
     "xlsxwriter>=3",
     "zstandard>=0.23",
+    "imageio-ffmpeg>=0.6",
+    "windows-capture>=2.0.1",
 ]
 
 [project.scripts]

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 from deaddemo import __version__
 from deaddemo.gui.context import AppContext
 
-PAGES = ["Demos", "Matches", "Players", "Downloads", "Viewer", "Settings"]
+PAGES = ["Demos", "Matches", "Players", "Downloads", "Viewer", "Videos", "Settings"]
 
 
 class MainWindow(QMainWindow):
@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         from deaddemo.gui.pages.matches_page import MatchesPage
         from deaddemo.gui.pages.players_page import PlayersPage
         from deaddemo.gui.pages.settings_page import SettingsPage
+        from deaddemo.gui.pages.videos_page import VideosPage
         from deaddemo.gui.pages.viewer_page import ViewerPage
 
         self.pages: dict[str, QWidget] = {
@@ -76,6 +77,7 @@ class MainWindow(QMainWindow):
             "Players": PlayersPage(self.ctx),
             "Downloads": DownloadsPage(self.ctx),
             "Viewer": ViewerPage(self.ctx),
+            "Videos": VideosPage(self.ctx),
             "Settings": SettingsPage(self.ctx),
         }
         for name in PAGES:

@@ -137,6 +137,7 @@ class MatchDetailPage(QWidget):
         tll = QVBoxLayout(tl)
         tll.addWidget(self.timeline_filter)
         tll.addWidget(self.timeline_table, 1)
+        tll.addWidget(QLabel("Double-click an event to add it as a clip (see the Clips tab)"))
         self.tabs.addTab(tl, "Timeline")
 
         # Graphs tab (the in-game graph menu + extras)
@@ -177,6 +178,13 @@ class MatchDetailPage(QWidget):
 
         self.heatmap = HeatmapWidget(ctx)
         self.tabs.addTab(self.heatmap, "Heatmap")
+
+        # Clips tab (video sequences)
+        from deaddemo.gui.widgets.clips_tab import ClipsTab
+
+        self.clips = ClipsTab(ctx)
+        self.tabs.addTab(self.clips, "Clips")
+        self.timeline_table.doubleClicked.connect(self._timeline_to_clip)
 
         # Notes tab
         notes = QWidget()
@@ -235,6 +243,8 @@ class MatchDetailPage(QWidget):
                 self._fill_chat()
             elif name == "Heatmap":
                 self.heatmap.load_match(self.match, self.players)
+            elif name == "Clips":
+                self.clips.load_match(self.match, self.players)
         except Exception as exc:  # noqa: BLE001
             self.ctx.status(f"Could not load {name}: {exc}", 10000)
 
@@ -268,6 +278,15 @@ class MatchDetailPage(QWidget):
             t = fmt_clock(r.get("match_seconds"))
             lines.append(f"[{t}] ({r.get('chat_type')}) {cat.hero_name(r.get('hero_id'))}: {r.get('text')}")
         self.chat_view.setPlainText("\n".join(lines) or "No chat in this demo (or 'chat' dataset not stored).")
+
+    def _timeline_to_clip(self, index) -> None:
+        """Double-click a timeline event to turn it into a clip sequence."""
+        e = self.timeline_model.row_at(index)
+        if e is None or self.match is None:
+            return
+        if not self.clips.match:
+            self.clips.load_match(self.match, self.players)
+        self.clips.add_from_event(e.match_seconds, e.text[:60], e.hero_id)
 
     def _open_player(self, row: MatchPlayerRow | None) -> None:
         if row is not None and row.steam_id:

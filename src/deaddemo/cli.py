@@ -162,6 +162,77 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_video(args: argparse.Namespace) -> int:
+    from deaddemo.core.assets.catalog import catalog
+    from deaddemo.core.db.database import Database
+    from deaddemo.core.db.repos import MatchRepo
+    from deaddemo.core.steam import locator
+    from deaddemo.core.video import director
+    from deaddemo.core.video.sequences import GenerateOptions, SequenceRepo, generate
+    from deaddemo.settings import Settings
+
+    settings = Settings.load()
+    install = locator.detect(settings)
+    db = Database.open()
+    log = lambda msg: print(msg, flush=True)  # noqa: E731
+    match_id = int(args.match_id)
+    if args.video_command == "probe":
+        caps = director.probe(install, db, match_id, log, try_movie=args.movie,
+                              launch_mode=args.launch or settings.video_launch_mode)
+        print(json.dumps(caps.__dict__, indent=1))
+        return 0
+    match = MatchRepo(db).get(match_id)
+    if match is None:
+        print(f"match {match_id} is not analyzed", file=sys.stderr)
+        return 1
+    players = MatchRepo(db).players(match_id)
+    if args.video_command == "sequences":
+        hero = _pick_hero(players, args.player)
+        opts = GenerateOptions(kinds=tuple(args.kinds.split(",")), lead_in_s=settings.video_lead_in_s,
+                               lead_out_s=settings.video_lead_out_s)
+        seqs = generate(db, match, hero, opts, catalog().hero_name)
+        if args.save:
+            SequenceRepo(db).replace_all(match_id, seqs)
+        for s in seqs:
+            print(f"{s.start_s:7.1f}s – {s.end_s:7.1f}s  {s.label}")
+        print(f"{len(seqs)} sequence(s)" + (" saved" if args.save else ""))
+        return 0
+    if args.video_command == "record":
+        seqs = SequenceRepo(db).for_match(match_id)
+        if not seqs and args.player:
+            hero = _pick_hero(players, args.player)
+            seqs = generate(db, match, hero, GenerateOptions(), catalog().hero_name)
+        if not seqs:
+            print("no sequences; run `deaddemo video sequences <id> --player NAME --save` first", file=sys.stderr)
+            return 1
+        rs = director.RecordSettings(
+            width=args.width or settings.video_width, height=args.height or settings.video_height,
+            fps=args.fps or settings.video_fps, quality=settings.video_quality,
+            backend=args.backend or settings.video_backend, hide_hud=settings.video_hide_hud,
+            concat=args.concat, output_dir=settings.resolved_video_dir(), vcon_port=settings.vconsole_port,
+            launch_mode=args.launch or settings.video_launch_mode,
+        )
+        results = director.record(install, db, match_id, seqs[: args.limit] if args.limit else seqs, rs, log)
+        for r in results:
+            print(f"{'OK ' if r.path else 'ERR'} {r.sequence.label}: {r.path or r.error}")
+        return 0
+    return 1
+
+
+def _pick_hero(players, name: str | None) -> int:
+    if not name:
+        raise SystemExit("--player NAME is required")
+    lname = name.lower()
+    for p in players:
+        if (p.player_name or "").lower() == lname:
+            return p.hero_id
+    for p in players:
+        if lname in (p.player_name or "").lower():
+            return p.hero_id
+    raise SystemExit(f"no player named {name!r} in this match; players: "
+                     + ", ".join(p.player_name or "?" for p in players))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="deaddemo", description="Deadlock demo manager")
     p.add_argument("--version", action="version", version=f"deaddemo {__version__}")
@@ -210,6 +281,30 @@ def build_parser() -> argparse.ArgumentParser:
     gsl = gs.add_parser("salts", help="fetch replay salts for match ids")
     gsl.add_argument("match_id", nargs="+")
     g.set_defaults(func=_cmd_gc)
+
+    v = sub.add_parser("video", help="film clips from a demo by driving the Deadlock client")
+    vs = v.add_subparsers(dest="video_command", required=True)
+    vp = vs.add_parser("probe", help="launch the game once and test console control, seeking and the recorder")
+    vp.add_argument("match_id")
+    vp.add_argument("--movie", action="store_true",
+                    help="also test the engine recorder (relaunches once with gameinfo.gi patched for a few seconds)")
+    vp.add_argument("--launch", choices=["steam", "direct"], help="how to start the game (default: via Steam)")
+    vq = vs.add_parser("sequences", help="auto-generate clip sequences for a player")
+    vq.add_argument("match_id")
+    vq.add_argument("--player", required=True)
+    vq.add_argument("--kinds", default="kills,multikills,teamfights")
+    vq.add_argument("--save", action="store_true")
+    vr = vs.add_parser("record", help="record the saved sequences of a match")
+    vr.add_argument("match_id")
+    vr.add_argument("--player", help="generate default sequences for this player if none are saved")
+    vr.add_argument("--width", type=int)
+    vr.add_argument("--height", type=int)
+    vr.add_argument("--fps", type=int)
+    vr.add_argument("--backend", choices=["auto", "engine", "screen", "window"])
+    vr.add_argument("--concat", action="store_true")
+    vr.add_argument("--limit", type=int, help="record only the first N sequences")
+    vr.add_argument("--launch", choices=["steam", "direct"])
+    v.set_defaults(func=_cmd_video)
     return p
 
 

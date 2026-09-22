@@ -106,7 +106,16 @@ class ViewerPage(QWidget):
         self.hero_list.itemChanged.connect(self._heroes_changed)
         self.trails.toggled.connect(lambda on: setattr(self.view, "show_trails", on) or self._render())
         ctx.events.matches_changed.connect(self._fill_matches)
+        ctx.events.viewer_seek.connect(self.seek_to_seconds)
+        self._pending_seek: float | None = None
         self._fill_matches()
+
+    def seek_to_seconds(self, seconds: float) -> None:
+        if self.frames is None:
+            self._pending_seek = seconds
+            return
+        self.index = float(self.frames.index_for_seconds(seconds))
+        self._render()
 
     # -- data ------------------------------------------------------------------------
     def _fill_matches(self) -> None:
@@ -174,7 +183,8 @@ class ViewerPage(QWidget):
                                          f"{labels.get(k.victim, '?')}", k.tick)
             for o in fs.objectives:
                 self.event_combo.addItem(f"{fmt_clock(o.match_seconds)} {o.objective_type} destroyed", o.tick)
-            self.index = float(fs.index_for_seconds(0.0))
+            self.index = float(fs.index_for_seconds(self._pending_seek if self._pending_seek is not None else 0.0))
+            self._pending_seek = None
             self.header.setText(f"Match {match_id} — {match.map_name} — {fs.n_frames} frames "
                                 f"(every {step} ticks) — calibration: {assets.calibration.source}")
             self._render()

@@ -96,6 +96,20 @@ class SettingsPage(QWidget):
         self.btn_steam_logout.clicked.connect(self._steam_logout)
         self.btn_steam_status.clicked.connect(self._steam_check)
 
+        video_row = QHBoxLayout()
+        self.video_dir = _PathField(str(paths.data_dir() / "videos"))
+        self.btn_probe = QPushButton("Probe game capabilities")
+        self.btn_probe.setToolTip("Launches Deadlock (closed first!), plays a local demo, tests console control, "
+                                  "seeking and spectating. Takes a few minutes. Your video settings are restored "
+                                  "afterwards.")
+        self.btn_probe.clicked.connect(self._probe)
+        video_row.addWidget(self.video_dir, 1)
+        video_row.addWidget(self.btn_probe)
+        form.addRow("Video output folder", video_row)
+        self.probe_status = QLabel("")
+        self.probe_status.setWordWrap(True)
+        form.addRow("", self.probe_status)
+
         secrets_note = QLabel(
             "Secrets are never stored in settings.json or the project folder. Set DEADLOCK_API_KEY, "
             "DEADDEMO_STEAM_USER / DEADDEMO_STEAM_PASSWORD in your environment or a git-ignored .env file "
@@ -131,8 +145,84 @@ class SettingsPage(QWidget):
         self.auto_parse.setChecked(s.auto_parse_downloads)
         self.auto_history.setChecked(s.auto_refresh_history)
         self.use_gc.setChecked(s.use_steam_gc)
+        self.video_dir.set_text(s.video_output_dir)
         self._refresh_detected()
         self._refresh_steam()
+        self._refresh_probe()
+
+    def _refresh_probe(self) -> None:
+        from deaddemo.core.video.director import Capabilities
+
+        caps = Capabilities.load()
+        if not caps:
+            self.probe_status.setText("Video: not probed yet. Recording will fall back to screen capture.")
+            return
+        rec = ("works" if caps.startmovie_works else "unavailable" if caps.startmovie_works is False else "untested")
+        self.probe_status.setText(f"Video probe {caps.checked_at[:16]}: console={caps.transport or 'none'}, "
+                                  f"demo loads={caps.demo_loads}, seek={caps.seek_works}, spec_player="
+                                  f"{caps.spec_player_ok}, engine recorder={rec}. " + " ".join(caps.notes))
+
+    def _probe(self) -> None:
+        from deaddemo.core.gc.provider import game_running
+        from deaddemo.core.video import director
+
+        if game_running():
+            self.ctx.status("Close Deadlock first", 8000)
+            return
+        client_build = self.ctx.install.client_build
+        candidates = []
+        for m in self.ctx.matches.all():
+            demos = [d for d in self.ctx.demos.by_match(m.match_id) if d.status in ("found", "parsed")]
+            if demos:
+                candidates.append((demos[0].build or 0, m.match_id))
+        playable = [mid for build, mid in candidates if not client_build or build >= client_build]
+        if not candidates:
+            msg = "Analyze a local demo first."
+            self.probe_status.setText("Video probe: " + msg)
+            self.ctx.status(msg, 8000)
+            return
+        if not playable:
+            newest = max(b for b, _ in candidates)
+            msg = (f"No demo on the installed build {client_build} (newest local demo is build {newest}). Deadlock "
+                   "only plays demos from the current build; download or record a fresh one, analyze it, then probe.")
+            self.probe_status.setText("Video probe: " + msg)
+            self.ctx.status("No demo on the current build to probe with", 8000)
+            return
+        match_id = max(playable)
+        install, db = self.ctx.install, self.ctx.db
+        self.probe_status.setText(f"Probing with match {match_id}… the game will open; do not touch it. "
+                                  "This takes a few minutes.")
+
+        def work(progress, cancel):
+            lines = []
+
+            def log(msg):
+                lines.append(msg)
+                progress(0, 0, msg[:160])
+
+            # the GUI probe checks control + seeking only; `deaddemo video probe` also tests startmovie
+            return director.probe(install, db, match_id, log, cancel=cancel, try_movie=False,
+                                  launch_mode=self.ctx.settings.video_launch_mode)
+
+        self._probe_lines: list[str] = []
+
+        def on_progress(_i, _n, msg):
+            self._probe_lines.append(msg)
+            self.probe_status.setText("Probing…\n" + "\n".join(self._probe_lines[-6:]))
+
+        def done(_caps):
+            self._refresh_probe()
+            self.ctx.status("Probe finished")
+
+        def failed(err: str) -> None:
+            first = err.splitlines()[0]
+            self.probe_status.setText("Video probe failed: " + first + "\n\nLast steps:\n"
+                                      + "\n".join(self._probe_lines[-12:]))
+            self.ctx.status("Video probe failed: " + first, 15000)
+
+        self.btn_probe.setEnabled(False)
+        self.ctx.jobs.job_finished.connect(lambda n: self.btn_probe.setEnabled(True) if n == "video-probe" else None)
+        self.ctx.jobs.submit("video-probe", work, on_finished=done, on_failed=failed, on_progress=on_progress)
 
     def _refresh_steam(self) -> None:
         from deaddemo.core import secrets
@@ -208,6 +298,7 @@ class SettingsPage(QWidget):
         s.auto_parse_downloads = self.auto_parse.isChecked()
         s.auto_refresh_history = self.auto_history.isChecked()
         s.use_steam_gc = self.use_gc.isChecked()
+        s.video_output_dir = self.video_dir.text() or None
         s.save()
         self.ctx.redetect()
         self._refresh_detected()

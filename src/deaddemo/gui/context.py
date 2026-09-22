@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Signal
+
+if TYPE_CHECKING:
+    from deaddemo.core.video.sequences import SequenceRepo, VideoRepo
 
 from deaddemo.core.db.database import Database
 from deaddemo.core.db.repos import (
@@ -27,11 +31,13 @@ class AppEvents(QObject):
     matches_changed = Signal()
     history_changed = Signal()
     downloads_changed = Signal()
+    videos_changed = Signal()
     settings_changed = Signal()
     status_message = Signal(str, int)  # message, timeout ms
     open_match = Signal(int)  # match_id
     open_viewer = Signal(int)  # match_id
     open_player = Signal(object)  # steam_id64 (too large for Qt's 32-bit int signal payload)
+    viewer_seek = Signal(float)  # match seconds
 
 
 @dataclass
@@ -48,8 +54,14 @@ class AppContext:
     tags: TagRepo = field(init=False)
     calibrations: CalibrationRepo = field(init=False)
     player_notes: PlayerNotesRepo = field(init=False)
+    sequences: SequenceRepo = field(init=False)
+    videos: VideoRepo = field(init=False)
 
     def __post_init__(self) -> None:
+        from deaddemo.core.video.sequences import SequenceRepo, VideoRepo
+
+        self.sequences = SequenceRepo(self.db)
+        self.videos = VideoRepo(self.db)
         self.demos = DemoRepo(self.db)
         self.matches = MatchRepo(self.db)
         self.history = HistoryRepo(self.db)

@@ -19,6 +19,35 @@ has downloaded, archive them before Valve expires them, parse them into stats, a
 | Viewer | 2D minimap playback with hero markers, health rings, movement trails, kill markers, objective markers, scrubbing, speed control, hero filters, jump-to-event. Manual calibration dialog if the default map transform is off. |
 | Settings | Paths, account override, parallel parses, extra boon datasets, viewer sampling. |
 
+## Video clips (experimental)
+
+The Clips tab of an analyzed match builds *sequences* (a time range plus whom to watch) from kills,
+multi-kills, teamfights, deaths, first blood, objectives or by hand, and **Record…** launches the
+Deadlock client, drives the replay over Valve's VConsole remote console (`-vconsole`), seeks to each
+sequence, locks the camera on the player, hides the HUD and captures it:
+
+- **Window recorder** (default): Windows Graphics Capture of the game window, piped into ffmpeg
+  (NVENC when available) at a constant frame rate. It captures the window's own surface, so you can
+  keep using the PC while it records; just do not minimize the game. The engine ignores `-w/-h` and
+  uses your saved video settings, so clips come out at your normal resolution. No audio.
+- **Screen recorder**: ffmpeg desktop duplication of the game window's screen area. Only sees what is
+  on top, so the game must stay unobstructed. No audio.
+- **Engine recorder** (`startmovie`, experimental, opt-in): would be frame-exact with audio, but the
+  command is silently blocked in the retail client. The CS2 trick of setting `DefensiveConCommands 0` in
+  `gameinfo.gi` does not work here: none of Deadlock's binaries even contain that key (verified on
+  build 6698). `deaddemo video probe <id> --movie` tests it; it edits `gameinfo.gi` for a few seconds
+  and restores the exact bytes, but note that Steam's "verify integrity" and mod managers also touch
+  that file. Always launched with `-insecure`.
+
+A filming launch makes the engine rewrite `game/citadel/cfg/video.txt` and `cfg/machine_convars.vcfg`
+(window mode, `fps_max`, `engine_no_focus_sleep`); both are snapshotted before the launch and restored
+once the game has exited, so your settings survive. Steam is started first if it is not running.
+
+Clips land in the video output folder (Settings) and are listed on the Videos page. CLI:
+`deaddemo video probe <id>`, `deaddemo video sequences <id> --player NAME --save`,
+`deaddemo video record <id> --fps 60 --backend window`. Deadlock must be closed first, and
+the demo must have been recorded on the currently installed build (older demos are refused by the game).
+
 ## Development
 
 ```

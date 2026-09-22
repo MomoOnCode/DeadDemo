@@ -191,6 +191,37 @@ CREATE TABLE IF NOT EXISTS player_notes (
   updated_at TEXT
 );
 
+-- Clip sequences (tick ranges to film) and recorded videos.
+CREATE TABLE IF NOT EXISTS sequences (
+  id               INTEGER PRIMARY KEY,
+  match_id         INTEGER NOT NULL,
+  label            TEXT,
+  start_s          REAL NOT NULL,
+  end_s            REAL NOT NULL,
+  focus_hero_id    INTEGER,
+  focus_name       TEXT,
+  focus_account_id INTEGER,
+  camera           TEXT,
+  hud              INTEGER NOT NULL DEFAULT 0,
+  timescale        REAL NOT NULL DEFAULT 1.0,
+  sort             INTEGER NOT NULL DEFAULT 0,
+  kind             TEXT
+);
+CREATE INDEX IF NOT EXISTS sequences_match ON sequences(match_id);
+
+CREATE TABLE IF NOT EXISTS videos (
+  id           INTEGER PRIMARY KEY,
+  match_id     INTEGER NOT NULL,
+  path         TEXT NOT NULL,
+  sequence_ids TEXT,
+  width        INTEGER, height INTEGER, fps INTEGER,
+  backend      TEXT,
+  duration_s   REAL,
+  created_at   TEXT NOT NULL,
+  error        TEXT,
+  label        TEXT
+);
+
 CREATE TABLE IF NOT EXISTS calibrations (
   map_name       TEXT PRIMARY KEY,
   image_path     TEXT,

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from deaddemo import paths
 
-SCHEMA_VERSION = 2  # 2: match_player_extras, player_notes (schema.sql is idempotent, so re-running it migrates)
+SCHEMA_VERSION = 3  # 2: match_player_extras, player_notes; 3: sequences, videos (schema.sql is idempotent)
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 
 
