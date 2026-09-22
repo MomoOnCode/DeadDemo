@@ -1,5 +1,10 @@
 # DeadDemo
 
+I am a real developer I promise, but please know this was an AI driven proof of concept that worked out quite well. Eventually this disclaimer will be removed as I comb through and extensively test and fix the slop that was provided implement the features. It utilizes your steam login and understand you are trusting your steam credentials with vibe-coded software.  
+
+
+# Cue Claude Generated README I never asked it to make :)
+
 A demo manager for Valve's Deadlock, in the spirit of CS Demo Manager: find the replays the game
 has downloaded, archive them before Valve expires them, parse them into stats, and replay them on a
 2D minimap.
