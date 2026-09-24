@@ -11,6 +11,9 @@ def main() -> int:
     from deaddemo.core import secrets
 
     secrets.load_dotenv()
+    from deaddemo.core.log import setup_logging
+
+    setup_logging()
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 

@@ -105,7 +105,9 @@ class ViewerPage(QWidget):
         self.event_combo.activated.connect(self._jump_event)
         self.hero_list.itemChanged.connect(self._heroes_changed)
         self.trails.toggled.connect(lambda on: setattr(self.view, "show_trails", on) or self._render())
-        ctx.events.matches_changed.connect(self._fill_matches)
+        from deaddemo.gui.util import debounced
+
+        ctx.events.matches_changed.connect(debounced(self, self._fill_matches, 300))
         ctx.events.viewer_seek.connect(self.seek_to_seconds)
         self._pending_seek: float | None = None
         self._fill_matches()

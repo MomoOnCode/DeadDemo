@@ -81,8 +81,11 @@ class DemosPage(QWidget):
         self.btn_drop_ticks.clicked.connect(self._delete_positions)
         self.btn_delete_partial.clicked.connect(self._delete_partials)
         self.search.textChanged.connect(self.proxy.setFilterFixedString)
-        ctx.events.demos_changed.connect(self.reload)
-        ctx.events.settings_changed.connect(self.reload)
+        from deaddemo.gui.util import debounced
+
+        reload = debounced(self, self.reload)
+        ctx.events.demos_changed.connect(reload)
+        ctx.events.settings_changed.connect(reload)
         self.reload()
 
     # -- data ------------------------------------------------------------------------

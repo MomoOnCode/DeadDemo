@@ -13,8 +13,8 @@ has downloaded, archive them before Valve expires them, parse them into stats, a
 | Page | What it does |
 |---|---|
 | Demos | Scans `game\citadel\replays` (and `addons\replays`, the download folder, extra folders), reads build/map/match id from each demo header, flags `.dem.partial` leftovers and demos older than the installed client, parses on demand, copies a `playdemo` command for the in-game console. |
-| Matches | Your match history from deadlock-api.com with local/parsed/downloading state, one-click download of replays that have a known URL, "download everything missing from the last N days". |
-| Match detail | Scoreboard per team, kill/objective/teamfight timeline, the in-game graph menu (souls, souls/min, kills, deaths, healing, lane stats, damage breakdown by ability/type/target, damage to/from players, healing by source) with Player/Team toggle plus extras (net worth lead, kill lead, rolling income, unspent souls, time dead), final builds with item icons and hover stats, purchase order, damage dealt/taken, chat, position/death/kill heatmaps, tags and comments, XLSX/JSON export. |
+| Matches | Your match history from deadlock-api.com, completed by the Steam Game Coordinator (the same feed the in-game history screen uses) when you are logged in, plus any match you analyzed locally that neither lists yet. Local/parsed/downloading state, MVP / Key Player marker, one-click download of replays that have a known URL, "download everything missing from the last N days". |
+| Match detail | Scoreboard per team with the post-game MVP and Key Player awards (hover for the earned accolades), kill/objective/teamfight timeline, the in-game graph menu (souls, souls/min, kills, deaths, healing, lane stats, damage breakdown by ability/type/target, damage to/from players, healing by source) with Player/Team toggle plus extras (net worth lead, kill lead, rolling income, unspent souls, time dead), final builds with item icons and hover stats, purchase order, damage dealt/taken, chat, position/death/kill heatmaps, tags and comments, XLSX/JSON export. |
 | Players | Cross-match aggregates for every player seen in parsed demos, and a per-player profile (double-click): win ratio from history and from demos, K/D, KDA, kill participation, souls and damage per minute, headshot %, damage split, multi-kills, first blood, teamfights won, tempo at 10/20 min, lanes, nemesis and favourite victims, teammates and opponents with win rates, most bought and opening items, ranked badge history, hero pool, per-match trend graphs, an aggregate position heatmap, and notes. |
 | Viewer | 2D minimap playback with hero markers, health rings, movement trails, kill markers, objective markers, scrubbing, speed control, hero filters, jump-to-event. Manual calibration dialog if the default map transform is off. |
 | Settings | Paths, account override, parallel parses, extra boon datasets, viewer sampling. |
@@ -29,7 +29,10 @@ sequence, locks the camera on the player, hides the HUD and captures it:
 - **Window recorder** (default): Windows Graphics Capture of the game window, piped into ffmpeg
   (NVENC when available) at a constant frame rate. It captures the window's own surface, so you can
   keep using the PC while it records; just do not minimize the game. The engine ignores `-w/-h` and
-  uses your saved video settings, so clips come out at your normal resolution. No audio.
+  uses your saved video settings, so clips come out at your normal resolution. Game audio is captured
+  from deadlock.exe alone through Windows' per-process loopback (Windows 10 build 20348+), so Discord
+  or music never end up in a clip; `snd_mute_losefocus` is switched off for the session because the
+  game sits behind your other windows while filming. Untick "Game audio" (or `--no-audio`) to skip it.
 - **Screen recorder**: ffmpeg desktop duplication of the game window's screen area. Only sees what is
   on top, so the game must stay unobstructed. No audio.
 - **Engine recorder** (`startmovie`, experimental, opt-in): would be frame-exact with audio, but the
@@ -55,7 +58,8 @@ uv sync
 uv run deaddemo info                 # detected Steam install, account, data dirs
 uv run deaddemo scan                 # catalog local replays
 uv run deaddemo parse 104589898      # parse a match (id from scan, or a .dem path)
-uv run deaddemo history              # pull match history from deadlock-api.com
+uv run deaddemo history              # pull match history from deadlock-api.com (+ Steam GC when logged in)
+uv run deaddemo awards <match_id>    # MVP / Key Player and accolades from the match metadata
 uv run deaddemo download <match_id>  # fetch + decompress a replay (add --parse)
 uv run deaddemo export <match_id> --xlsx out.xlsx
 uv run deaddemo-gui                  # desktop app (or just `uv run deaddemo`)
@@ -75,13 +79,20 @@ Packaging: `uv run pyinstaller packaging/deaddemo.spec` produces `dist/DeadDemo/
   matches. For the rest the app can ask Valve's Game Coordinator directly through the `deaddemo-gc`
   helper (see below). Replays you download in game land in the replays folder and are picked up by
   the scanner either way.
+- **Match history completeness.** deadlock-api's per-player history lags and misses matches (on one
+  account, 67 of the 100 most recent were absent). The Matches page therefore also shows matches you
+  analyzed locally, asks deadlock-api to re-pull from Valve when a local demo is newer than its newest
+  entry (once per hour), and, when the GC helper is logged in and the game is closed, pulls your history
+  straight from the Game Coordinator (`deaddemo gc history --store`). Refresh outcomes and errors are
+  logged to `logs/app.log` in the data directory.
 
 ## Steam Game Coordinator helper (`gc/`)
 
 A small Rust binary built on [steam-vent](https://codeberg.org/icewind/steam-vent) that logs into
-Steam with *your* account and asks the Deadlock Game Coordinator for a match's replay salts, the same
-request the game makes when you press "Download replay". Valve allows roughly 40 of these per
-account per day; the app tracks the quota.
+Steam with *your* account and asks the Deadlock Game Coordinator for a match's replay salts (the same
+request the game makes when you press "Download replay") or for your match history (`history
+<account_id> [pages]`, 50 matches per page). Valve allows roughly 40 GC requests per account per day;
+the app tracks the quota. Steam routes GC replies to a running game, so close Deadlock first.
 
 ```
 cd gc

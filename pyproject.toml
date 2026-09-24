@@ -16,6 +16,7 @@ dependencies = [
     "zstandard>=0.23",
     "imageio-ffmpeg>=0.6",
     "windows-capture>=2.0.1",
+    "comtypes>=1.4 ; sys_platform == 'win32'",
 ]
 
 [project.scripts]

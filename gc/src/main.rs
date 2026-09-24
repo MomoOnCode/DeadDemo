@@ -9,6 +9,13 @@
 //!   deaddemo-gc status           DEADDEMO_STEAM_USER, DEADDEMO_STEAM_REFRESH_TOKEN -> {"ok", "steam_id64"}
 //!   deaddemo-gc salts <id>...    same env -> one line per match:
 //!                                {"match_id","result","replay_salt","metadata_salt","cluster_id","replay_valid_through"}
+//!   deaddemo-gc history <account_id> [max_pages]
+//!                                same env -> one line per match (the client's own match history, newest
+//!                                first, paginated with continue_cursor):
+//!                                {"match_id","hero_id","start_time","match_duration_s","match_result",
+//!                                 "player_team","player_kills","player_deaths","player_assists","last_hits",
+//!                                 "denies","hero_level","net_worth","team_abandoned","abandoned_time_s",
+//!                                 "match_mode","game_mode"}
 //! Diagnostics go to stderr (RUST_LOG=debug for the wire-level log).
 
 use std::env;
@@ -23,7 +30,8 @@ use steam_vent::auth::{
 };
 use steam_vent::{Connection, ConnectionTrait, GameCoordinator, ServerList};
 use steam_vent_proto_deadlock::citadel_gcmessages_client::{
-    CMsgClientToGCGetMatchMetaData, CMsgClientToGCGetMatchMetaDataResponse,
+    CMsgClientToGCGetMatchHistory, CMsgClientToGCGetMatchHistoryResponse, CMsgClientToGCGetMatchMetaData,
+    CMsgClientToGCGetMatchMetaDataResponse,
 };
 
 const DEADLOCK_APP_ID: u32 = 1422450;
@@ -58,6 +66,27 @@ struct SaltsOut {
     metadata_salt: Option<u32>,
     cluster_id: Option<u32>,
     replay_valid_through: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct HistoryOut {
+    match_id: u64,
+    hero_id: Option<u32>,
+    start_time: Option<u32>,
+    match_duration_s: Option<u32>,
+    match_result: Option<u32>,
+    player_team: Option<i32>,
+    player_kills: Option<u32>,
+    player_deaths: Option<u32>,
+    player_assists: Option<u32>,
+    last_hits: Option<u32>,
+    denies: Option<u32>,
+    hero_level: Option<u32>,
+    net_worth: Option<u32>,
+    team_abandoned: Option<bool>,
+    abandoned_time_s: Option<u32>,
+    match_mode: Option<i32>,
+    game_mode: Option<i32>,
 }
 
 fn env_required(name: &str) -> Result<String> {
@@ -183,16 +212,8 @@ async fn cmd_salts(ids: Vec<u64>) -> Result<()> {
         bail!("no match ids given");
     }
     let connection = connect_from_env().await?;
-    // Announces "playing Deadlock" to Steam, then sends ClientHello until the GC answers Welcome.
-    let (gc, _welcome) = tokio::time::timeout(
-        GC_TIMEOUT,
-        connection.game_coordinator(&steam_vent_proto_deadlock::GCHandshake::default()),
-    )
-    .await
-    .map_err(|_| anyhow!("timed out waiting for the Deadlock Game Coordinator welcome"))?
-    .context("Game Coordinator handshake")?;
+    let gc = game_coordinator(&connection).await?;
     let _ = DEADLOCK_APP_ID;
-    eprintln!("game coordinator ready");
     let mut failures = 0usize;
     for (i, id) in ids.iter().enumerate() {
         if i > 0 {
@@ -227,8 +248,89 @@ async fn cmd_salts(ids: Vec<u64>) -> Result<()> {
     Ok(())
 }
 
+async fn game_coordinator(connection: &Connection) -> Result<GameCoordinator> {
+    // Announces "playing Deadlock" to Steam, then sends ClientHello until the GC answers Welcome.
+    let (gc, _welcome) = tokio::time::timeout(
+        GC_TIMEOUT,
+        connection.game_coordinator(&steam_vent_proto_deadlock::GCHandshake::default()),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for the Deadlock Game Coordinator welcome"))?
+    .context("Game Coordinator handshake")?;
+    eprintln!("game coordinator ready");
+    Ok(gc)
+}
+
+/// The client's own match history, straight from the GC (what the in-game history screen shows).
+/// Pages are fetched newest-first until the GC returns no continue cursor or `max_pages` is reached.
+async fn cmd_history(account_id: u32, max_pages: usize) -> Result<()> {
+    let connection = connect_from_env().await?;
+    let gc = game_coordinator(&connection).await?;
+    let mut cursor: Option<u64> = None;
+    let mut total = 0usize;
+    for page in 0..max_pages.max(1) {
+        if page > 0 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        let mut request = CMsgClientToGCGetMatchHistory::new();
+        request.set_account_id(account_id);
+        if let Some(c) = cursor {
+            request.set_continue_cursor(c);
+        }
+        let resp: CMsgClientToGCGetMatchHistoryResponse = tokio::time::timeout(GC_TIMEOUT, gc.job(request))
+            .await
+            .map_err(|_| anyhow!("timed out waiting for the Game Coordinator"))?
+            .context("GetMatchHistory")?;
+        let result = resp.result.as_ref().map(|r| match r.enum_value() {
+            Ok(v) => format!("{v:?}"),
+            Err(raw) => format!("unknown({raw})"),
+        });
+        eprintln!(
+            "page {}: result={} matches={} cursor={:?}",
+            page + 1,
+            result.as_deref().unwrap_or("missing"),
+            resp.matches.len(),
+            resp.continue_cursor
+        );
+        if resp.matches.is_empty() {
+            if total == 0 {
+                bail!("GetMatchHistory returned no matches ({})", result.as_deref().unwrap_or("no result"));
+            }
+            break;
+        }
+        for m in &resp.matches {
+            total += 1;
+            print_json(&HistoryOut {
+                match_id: m.match_id(),
+                hero_id: m.hero_id,
+                start_time: m.start_time,
+                match_duration_s: m.match_duration_s,
+                match_result: m.match_result,
+                player_team: m.player_team.map(|t| t.value()),
+                player_kills: m.player_kills,
+                player_deaths: m.player_deaths,
+                player_assists: m.player_assists,
+                last_hits: m.last_hits,
+                denies: m.denies,
+                hero_level: m.hero_level,
+                net_worth: m.net_worth,
+                team_abandoned: m.team_abandoned,
+                abandoned_time_s: m.abandoned_time_s,
+                match_mode: m.match_mode.map(|v| v.value()),
+                game_mode: m.game_mode.map(|v| v.value()),
+            });
+        }
+        match resp.continue_cursor {
+            Some(c) if c != 0 => cursor = Some(c),
+            _ => break,
+        }
+    }
+    eprintln!("{total} matches");
+    Ok(())
+}
+
 fn usage() -> ! {
-    eprintln!("usage: deaddemo-gc <login|status|salts <match_id>...>");
+    eprintln!("usage: deaddemo-gc <login|status|salts <match_id>...|history <account_id> [max_pages]>");
     std::process::exit(2);
 }
 
@@ -247,6 +349,15 @@ async fn main() {
             let ids: Result<Vec<u64>> = args.map(|a| a.parse::<u64>().context("match id must be a number")).collect();
             match ids {
                 Ok(ids) => cmd_salts(ids).await,
+                Err(e) => Err(e),
+            }
+        }
+        "history" => {
+            let account: Result<u32> =
+                args.next().unwrap_or_else(|| usage()).parse::<u32>().context("account id must be a number");
+            let pages = args.next().and_then(|p| p.parse::<usize>().ok()).unwrap_or(5);
+            match account {
+                Ok(account_id) => cmd_history(account_id, pages).await,
                 Err(e) => Err(e),
             }
         }

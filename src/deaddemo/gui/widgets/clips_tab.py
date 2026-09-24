@@ -27,7 +27,8 @@ from deaddemo.gui.context import AppContext
 from deaddemo.gui.models.table_model import Column, RowTableModel
 from deaddemo.gui.theme import fmt_clock
 
-KIND_LABELS = {"kills": "Kills", "deaths": "Deaths", "multikills": "Multi-kills", "first_blood": "First blood",
+KIND_LABELS = {"kills": "Kills", "bursts": "Bursts (2+ kills/assists in quick succession)", "deaths": "Deaths",
+               "multikills": "Multi-kills", "first_blood": "First blood",
                "teamfights": "Teamfights", "objectives": "Objectives destroyed", "midboss": "Mid boss"}
 
 
@@ -63,7 +64,7 @@ class GenerateDialog(QDialog):
         self.kind_boxes: dict[str, QCheckBox] = {}
         for k in KINDS:
             cb = QCheckBox(KIND_LABELS[k])
-            cb.setChecked(k in ("kills", "multikills", "teamfights"))
+            cb.setChecked(k in ("kills", "bursts", "multikills", "teamfights"))
             self.kind_boxes[k] = cb
             form.addRow("", cb)
         self.lead_in = QDoubleSpinBox()
@@ -72,6 +73,11 @@ class GenerateDialog(QDialog):
         self.lead_out = QDoubleSpinBox()
         self.lead_out.setRange(0, 60)
         self.lead_out.setValue(ctx.settings.video_lead_out_s)
+        self.chain = QDoubleSpinBox()
+        self.chain.setRange(0, 120)
+        self.chain.setValue(ctx.settings.video_chain_kills_s)
+        self.chain.setToolTip("A kill this many seconds after the previous one extends the same clip instead of "
+                              "starting a new one")
         self.max_n = QSpinBox()
         self.max_n.setRange(1, 200)
         self.max_n.setValue(40)
@@ -79,6 +85,7 @@ class GenerateDialog(QDialog):
         self.camera.addItems(list(CAMERAS))
         form.addRow("Seconds before", self.lead_in)
         form.addRow("Seconds after", self.lead_out)
+        form.addRow("Chain kills within (s)", self.chain)
         form.addRow("Max clips", self.max_n)
         form.addRow("Camera", self.camera)
         self.replace = QCheckBox("Replace existing sequences")
@@ -92,6 +99,7 @@ class GenerateDialog(QDialog):
     def options(self) -> GenerateOptions:
         return GenerateOptions(kinds=tuple(k for k, cb in self.kind_boxes.items() if cb.isChecked()),
                                lead_in_s=self.lead_in.value(), lead_out_s=self.lead_out.value(),
+                               chain_kills_s=self.chain.value(),
                                max_sequences=self.max_n.value(), camera=self.camera.currentText())
 
 

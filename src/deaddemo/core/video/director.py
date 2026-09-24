@@ -30,6 +30,10 @@ FATAL_RE = re.compile(r"FATAL ERROR|Engine Error")  # dev assertions ("Assertion
 MENU_ACTIVE_RE = re.compile(r"Host activate: Idle")
 LOOP_DONE_RE = re.compile(r"OnSwitchLoopModeFinished\( game : success \)")
 DEMO_ACTIVE_RE = re.compile(r"Host activate: Playing Demo")
+DEMO_OPEN_FAIL_RE = re.compile(r"CDemoFile::Open: couldn't open file [^\r\n]*|demo file '[^']*' doesn't exist")
+# console lines worth showing in the GUI log (everything goes to the transcript file)
+INTERESTING_RE = re.compile(r"Host activate|Playing Demo|CDemoFile|demo file|ReadDemoHeader|FATAL|Engine Error|"
+                            r"Currently playing|paused on tick|Demo Skipping|Unknown command|Loaded video settings")
 Progress = Callable[[str], None]
 
 
@@ -49,6 +53,10 @@ class RecordSettings:
     quality: str = "high"
     backend: str = "window"  # window (WGC of the game window) | screen (desktop duplication) | engine | auto
     hide_hud: bool = True
+    audio: bool = True  # window backend: capture deadlock.exe's audio via process loopback
+    auto_hdr_off: bool = True  # switch Windows Auto HDR off for deadlock.exe while filming (else clips blow out)
+    preroll_s: float = 6.0  # play this long before each clip so models, textures and skins stream in
+    mods_extra_preroll_s: float = 6.0  # added to the pre-roll when addon VPKs are mounted (skin mods)
     concat: bool = False
     output_dir: Path = field(default_factory=lambda: paths.data_dir() / "videos")
     vcon_port: int = 29005
@@ -93,15 +101,19 @@ class GameSession:
     """One launched game process plus its console."""
 
     def __init__(self, install: SteamInstall, options: launcher.LaunchOptions, log: Progress,
-                 cancel: threading.Event | None = None, launch_mode: str = "steam"):
+                 cancel: threading.Event | None = None, launch_mode: str = "steam",
+                 console_log: Progress | None = None, auto_hdr_off: bool = True):
         self.install = install
         self.options = options
         self.log = log
+        self.console_log = console_log  # full console transcript; when None, everything goes to ``log``
         self.launch_mode = launch_mode
+        self.auto_hdr_off = auto_hdr_off
         self.cancel = cancel or threading.Event()
         self.proc = None
         self.unlock: launcher.GameInfoUnlock | None = None
         self.guard: launcher.ConfigGuard | None = None
+        self.hdr_guard: launcher.AutoHdrGuard | None = None
         self.console: ConsoleBase | None = None
         self.transport: str | None = None
 
@@ -116,6 +128,14 @@ class GameSession:
         # the engine saves our -w/-h/-windowed into cfg/video.txt and archived convars into
         # cfg/machine_convars.vcfg; snapshot them now, restore after the process is gone
         self.guard = launcher.ConfigGuard(launcher.citadel_dir(self.install)).snapshot()
+        if self.auto_hdr_off:
+            try:
+                self.hdr_guard = launcher.AutoHdrGuard(launcher.find_deadlock_exe(self.install))
+                if self.hdr_guard.disable():
+                    self.log("Auto HDR switched off for deadlock.exe for this session (restored afterwards)")
+            except OSError as exc:
+                self.log(f"warning: could not change the Auto HDR setting: {exc}")
+                self.hdr_guard = None
         self.log("Launching Deadlock …")
         self.proc, self.unlock = launcher.launch(self.install, self.options, launcher.gameinfo_path(self.install),
                                                  mode=self.launch_mode, log=self.log)
@@ -158,7 +178,12 @@ class GameSession:
         self.launched_at = time.monotonic()
 
         def on_line(line: str) -> None:
-            self.log("  > " + line[:200])
+            if self.console_log is None:
+                self.log("  > " + line[:200])
+            else:
+                self.console_log("  > " + line[:200])
+                if INTERESTING_RE.search(line):
+                    self.log("  > " + line[:200])
             if FATAL_RE.search(line) and self.fatal is None:
                 self.fatal = line.strip()
 
@@ -213,7 +238,7 @@ class GameSession:
         if self.console.wait_for(LOOP_DONE_RE, timeout=60.0, since=since):
             self.log("Hideout game loop finished loading")
         self._wait_quiet(quiet_s=5.0, max_s=60.0)
-        min_uptime = 20.0
+        min_uptime = 30.0
         remaining = min_uptime - (time.monotonic() - self.launched_at)
         if remaining > 0:
             time.sleep(remaining)
@@ -238,11 +263,14 @@ class GameSession:
             self._check_fatal()
             if self.proc is not None and self.proc.poll() is not None:
                 raise VideoError("game exited while loading the demo")
+            failed = self.console.wait_for(DEMO_OPEN_FAIL_RE, timeout=0.1, since=since)
+            if failed:
+                raise VideoError(f"the game could not open the demo: {failed.group(0)}")
             activated = self.console.wait_for(DEMO_ACTIVE_RE, timeout=2.0, since=since) is not None
         if not activated:
             raise VideoError("demo never activated (build mismatch? see the console log)")
         self.log("Demo activated; letting it settle …")
-        self._wait_quiet(quiet_s=3.0, max_s=45.0)
+        self._wait_quiet(quiet_s=5.0, max_s=60.0)
         self._check_fatal()
         for _ in range(10):
             p = self.playing()
@@ -256,7 +284,7 @@ class GameSession:
     def seek(self, tick: int, pause: bool = True) -> None:
         assert self.console
         self.console.send(f"demo_goto {tick} 0 {1 if pause else 0}")
-        self._wait_quiet(quiet_s=1.5, max_s=30.0)
+        self._wait_quiet(quiet_s=2.5, max_s=30.0)
 
     def wait_until_tick(self, tick: int, timeout: float, on_tick: Callable[[int], None] | None = None) -> int:
         deadline = time.monotonic() + timeout
@@ -331,6 +359,13 @@ class GameSession:
                 launcher.terminate(self.proc)
             if self.unlock is not None:
                 self.unlock.restore()
+            if self.hdr_guard is not None:
+                try:
+                    self.hdr_guard.restore()
+                    self.log("Auto HDR setting restored")
+                except OSError as exc:
+                    self.log(f"WARNING: could not restore the Auto HDR setting: {exc}")
+                self.hdr_guard = None
             if self.guard is not None:
                 try:
                     restored = self.guard.restore()
@@ -354,6 +389,42 @@ def demo_console_name(demo_path: str) -> str:
     if p.parent.name == "replays":
         return f"replays/{p.stem}"
     return str(p.with_suffix("")).replace("\\", "/")
+
+
+def _replays_dir(install: SteamInstall) -> Path:
+    from deaddemo.core.steam import locator
+
+    assert install.deadlock_dir
+    return locator.primary_replay_dir(install.deadlock_dir)
+
+
+def stage_demo(replays_dir: Path, demo_path: str, log: Progress) -> tuple[str, Callable[[], None]]:
+    """Make a demo playable by ``playdemo`` and return its console name plus a cleanup callback.
+
+    ``playdemo`` only resolves names inside the game's search paths (an absolute path is cut at the drive
+    colon: ``C.dem``), so a demo downloaded elsewhere is copied into ``game/citadel/replays`` for the
+    session. A copy the game folder already had (same size) is reused and never deleted."""
+    src = Path(demo_path)
+    if src.parent.name == "replays":
+        return f"replays/{src.stem}", lambda: None
+    replays_dir.mkdir(parents=True, exist_ok=True)
+    dest = replays_dir / f"{src.stem}.dem"
+    if dest.exists() and dest.stat().st_size == src.stat().st_size:
+        log(f"Using the copy already in the replays folder: {dest.name}")
+        return f"replays/{dest.stem}", lambda: None
+    log(f"Copying the demo into the game's replays folder ({src.stat().st_size / 1e6:.0f} MB) …")
+    tmp = dest.with_suffix(".dem.deaddemo-tmp")
+    shutil.copyfile(src, tmp)
+    tmp.replace(dest)
+
+    def cleanup() -> None:
+        try:
+            dest.unlink()
+            log(f"Removed the staged demo {dest.name}")
+        except OSError:
+            pass
+
+    return f"replays/{dest.stem}", cleanup
 
 
 _NOISE_RE = re.compile(r"\[Animation 2\]|\[SteamNetSockets\]|\[MeshSystem\]|Cannot apply Ragdoll|\[Localization")
@@ -393,87 +464,92 @@ def probe(install: SteamInstall, db: Database, match_id: int, log: Progress, *, 
     caps = Capabilities()
     caps.notes.append(f"log: {log_path}")
     match, demo = _resolve(db, match_id, install)
-    name = demo_console_name(demo.path)
-    tick_rate = match.tick_rate or 64
-    target = (match.game_start_tick or 0) + 300 * tick_rate
-    opts = launcher.LaunchOptions(width=1280, height=720, netcon_port=29006)
-    with GameSession(install, opts, both, cancel, launch_mode) as s:
-        caps.transport = s.transport
-        cur, total = s.play_demo(name)
-        caps.demo_loads = total > 0
-        s.seek(target, pause=True)
-        reached = s.wait_until_tick(target - 2 * tick_rate, timeout=90)
-        caps.seek_works = reached >= 0 and abs(reached - target) < 10 * tick_rate
-        both(f"seek to {target}: now at {reached} -> {'ok' if caps.seek_works else 'FAILED'}")
-        players = MatchRepo(db).players(match_id)
-        if players:
-            nm = players[0].player_name or ""
-            since = s.console.cursor
-            s.console.send(f'spec_player "{nm}"')
-            time.sleep(1.5)
-            out = " ".join(s.console.lines_since(since)).lower()
-            caps.spec_player_ok = "unknown command" not in out and "can't" not in out
-            since = s.console.cursor
-            s.console.send(f'spec_target "{nm}"')
-            time.sleep(1.5)
-            out = " ".join(s.console.lines_since(since)).lower()
-            caps.spec_target_ok = "unknown command" not in out
-        s.set_hud(False)
-        s.console.send("demo_resume")
-        t0 = s.playing()
-        time.sleep(3.0)
-        t1 = s.playing()
-        both(f"playback advancing: {t0} -> {t1}")
-        s.console.send("demo_pause")
-        s.set_hud(True)
-    if try_movie:
-        both("Relaunching with the movie recorder unlocked …")
-        opts = launcher.LaunchOptions(width=1280, height=720, unlock_movie=True)
-        rec_ok = False
-        with GameSession(install, opts, both, cancel, launch_mode) as s:
-            s.play_demo(name)
+    if game_running():
+        raise VideoError("Deadlock is already running. Close it first.")
+    name, cleanup_demo = stage_demo(_replays_dir(install), demo.path, both)
+    try:
+        tick_rate = match.tick_rate or 64
+        target = (match.game_start_tick or 0) + 300 * tick_rate
+        opts = launcher.LaunchOptions(width=1280, height=720, netcon_port=29006)
+        with GameSession(install, opts, both, cancel, launch_mode, console_log=file_log) as s:
+            caps.transport = s.transport
+            cur, total = s.play_demo(name)
+            caps.demo_loads = total > 0
             s.seek(target, pause=True)
-            s.wait_until_tick(target - 2 * tick_rate, timeout=90)
-            time.sleep(1.0)
-            # 1) what does the engine say about the command itself?
-            since = s.console.cursor
-            s.console.send("startmovie")
-            time.sleep(1.5)
-            reply = _interesting(s.console.lines_since(since))
-            caps.notes.append("startmovie reply: " + (" | ".join(reply) if reply else "(silence)"))
-            both("startmovie reply: " + (" | ".join(reply) if reply else "(silence)"))
-            # 2) record a few seconds
-            rec = EngineRecorder(s.console, launcher.movie_dir(install), 30, 1280, 720)
-            since = s.console.cursor
-            rec.start("deaddemo_probe")
+            reached = s.wait_until_tick(target - 2 * tick_rate, timeout=90)
+            caps.seek_works = reached >= 0 and abs(reached - target) < 10 * tick_rate
+            both(f"seek to {target}: now at {reached} -> {'ok' if caps.seek_works else 'FAILED'}")
+            players = MatchRepo(db).players(match_id)
+            if players:
+                nm = players[0].player_name or ""
+                since = s.console.cursor
+                s.console.send(f'spec_player "{nm}"')
+                time.sleep(1.5)
+                out = " ".join(s.console.lines_since(since)).lower()
+                caps.spec_player_ok = "unknown command" not in out and "can't" not in out
+                since = s.console.cursor
+                s.console.send(f'spec_target "{nm}"')
+                time.sleep(1.5)
+                out = " ".join(s.console.lines_since(since)).lower()
+                caps.spec_target_ok = "unknown command" not in out
+            s.set_hud(False)
             s.console.send("demo_resume")
-            time.sleep(4.0)
-            files = rec.stop()
+            t0 = s.playing()
+            time.sleep(3.0)
+            t1 = s.playing()
+            both(f"playback advancing: {t0} -> {t1}")
             s.console.send("demo_pause")
-            reply = _interesting(s.console.lines_since(since))
-            both("recording reply: " + (" | ".join(reply) if reply else "(silence)"))
-            found = _find_movie_output(install, "deaddemo_probe")
-            rec_ok = files.frame_count > 0 or bool(found)
-            caps.notes.append(f"startmovie frames={files.frame_count} wav={'yes' if files.wav else 'no'}"
-                              + (f" other output: {found[:3]}" if found else ""))
-            if not rec_ok and reply:
-                caps.notes.append("recording reply: " + " | ".join(reply)[:400])
-            if files.frames_dir and files.frames_dir.exists():
-                shutil.rmtree(files.frames_dir, ignore_errors=True)
-            for f in found:
-                try:
-                    Path(f).unlink()
-                except OSError:
-                    pass
-        caps.startmovie_works = rec_ok
-        both(f"engine recorder: {'works' if rec_ok else 'not available'}")
-    else:
-        previous = Capabilities.load()
-        if previous is not None:
-            caps.startmovie_works = previous.startmovie_works  # keep the last full test's verdict
-    caps.save()
-    both("Capabilities saved: " + json.dumps(caps.__dict__))
-    return caps
+            s.set_hud(True)
+        if try_movie:
+            both("Relaunching with the movie recorder unlocked …")
+            opts = launcher.LaunchOptions(width=1280, height=720, unlock_movie=True)
+            rec_ok = False
+            with GameSession(install, opts, both, cancel, launch_mode, console_log=file_log) as s:
+                s.play_demo(name)
+                s.seek(target, pause=True)
+                s.wait_until_tick(target - 2 * tick_rate, timeout=90)
+                time.sleep(1.0)
+                # 1) what does the engine say about the command itself?
+                since = s.console.cursor
+                s.console.send("startmovie")
+                time.sleep(1.5)
+                reply = _interesting(s.console.lines_since(since))
+                caps.notes.append("startmovie reply: " + (" | ".join(reply) if reply else "(silence)"))
+                both("startmovie reply: " + (" | ".join(reply) if reply else "(silence)"))
+                # 2) record a few seconds
+                rec = EngineRecorder(s.console, launcher.movie_dir(install), 30, 1280, 720)
+                since = s.console.cursor
+                rec.start("deaddemo_probe")
+                s.console.send("demo_resume")
+                time.sleep(4.0)
+                files = rec.stop()
+                s.console.send("demo_pause")
+                reply = _interesting(s.console.lines_since(since))
+                both("recording reply: " + (" | ".join(reply) if reply else "(silence)"))
+                found = _find_movie_output(install, "deaddemo_probe")
+                rec_ok = files.frame_count > 0 or bool(found)
+                caps.notes.append(f"startmovie frames={files.frame_count} wav={'yes' if files.wav else 'no'}"
+                                  + (f" other output: {found[:3]}" if found else ""))
+                if not rec_ok and reply:
+                    caps.notes.append("recording reply: " + " | ".join(reply)[:400])
+                if files.frames_dir and files.frames_dir.exists():
+                    shutil.rmtree(files.frames_dir, ignore_errors=True)
+                for f in found:
+                    try:
+                        Path(f).unlink()
+                    except OSError:
+                        pass
+            caps.startmovie_works = rec_ok
+            both(f"engine recorder: {'works' if rec_ok else 'not available'}")
+        else:
+            previous = Capabilities.load()
+            if previous is not None:
+                caps.startmovie_works = previous.startmovie_works  # keep the last full test's verdict
+        caps.save()
+        both("Capabilities saved: " + json.dumps(caps.__dict__))
+        return caps
+    finally:
+        cleanup_demo()
 
 
 def _find_movie_output(install: SteamInstall, stem: str) -> list[str]:
@@ -543,42 +619,62 @@ def record(install: SteamInstall, db: Database, match_id: int, sequences: list[S
         log("Engine recorder was reported unavailable by the probe; trying anyway")
     out_dir = settings.output_dir / str(match_id)
     out_dir.mkdir(parents=True, exist_ok=True)
-    name = demo_console_name(demo.path)
-    # window capture wants a bordered window: -noborder makes the engine ignore -w/-h and span the desktop
-    opts = launcher.LaunchOptions(width=settings.width, height=settings.height, windowed=settings.windowed,
-                                  borderless=(backend != "window"), vcon_port=settings.vcon_port,
-                                  unlock_movie=(backend == "engine"))
-    results: list[ClipResult] = []
-    with GameSession(install, opts, log, cancel, settings.launch_mode) as s:
-        s.play_demo(name)
-        # both are archived convars: remember the player's values and put them back before quitting
-        previous = s.set_convars({"engine_no_focus_sleep": "0", "fps_max": "0"})
-        log("Convars before filming: " + ", ".join(f"{k}={v}" for k, v in previous.items()))
-        rect = launcher.find_window_for_pid(s.proc.pid) if backend in ("screen", "window") else None
-        if backend in ("screen", "window") and rect is None:
-            raise VideoError("could not find the game window for capture")
-        if rect is not None:
-            log(f"Game window client area at ({rect.left},{rect.top}) {rect.width}x{rect.height}, "
-                f"frame offset ({rect.frame_left},{rect.frame_top})")
-        try:
-            _record_sequences(s, sequences, match, demo, settings, backend, caps, rect, out_dir, results, log,
-                              cancel, on_progress)
-        finally:
-            s.restore_convars(previous)
-            s.set_hud(True)
-    ok = [r.path for r in results if r.path]
-    if settings.concat and len(ok) > 1:
-        final = out_dir / f"match_{match_id}_{int(time.time())}.mp4"
-        log("Concatenating clips …")
-        encode.concat(ok, final)
-        results.append(ClipResult(Sequence(match_id, 0, sum(r.duration_s for r in results), "All clips"), final,
-                                  encode.probe_duration(final)))
-    return results
+    if game_running():
+        raise VideoError("Deadlock is already running. Close it first.")
+    name, cleanup_demo = stage_demo(_replays_dir(install), demo.path, log)
+    try:
+        # window capture wants a bordered window: -noborder makes the engine ignore -w/-h and span the desktop
+        opts = launcher.LaunchOptions(width=settings.width, height=settings.height, windowed=settings.windowed,
+                                      borderless=(backend != "window"), vcon_port=settings.vcon_port,
+                                      unlock_movie=(backend == "engine"))
+        results: list[ClipResult] = []
+        with GameSession(install, opts, log, cancel, settings.launch_mode, console_log=file_log,
+                     auto_hdr_off=settings.auto_hdr_off) as s:
+            s.play_demo(name)
+            # archived convars: remember the player's values and put them back before quitting. The game mutes
+            # itself when unfocused (snd_mute_losefocus), and it sits behind the player's windows while filming.
+            # fps_max is capped at twice the capture rate: enough for a smooth clip without hogging the GPU
+            # while the player does something else in the foreground.
+            previous = s.set_convars({"engine_no_focus_sleep": "0", "fps_max": str(max(2 * settings.fps, 60)),
+                                      "snd_mute_losefocus": "0"})
+            log("Convars before filming: " + ", ".join(f"{k}={v}" for k, v in previous.items()))
+            preroll = settings.preroll_s
+            n_mods = launcher.addon_vpk_count(install)
+            if n_mods:
+                preroll += settings.mods_extra_preroll_s
+                log(f"{n_mods} addon VPK(s) mounted (mods): pre-roll extended to {preroll:.0f}s per clip")
+            else:
+                log(f"Pre-roll {preroll:.0f}s per clip")
+            rect = launcher.find_window_for_pid(s.proc.pid) if backend in ("screen", "window") else None
+            if backend in ("screen", "window") and rect is None:
+                raise VideoError("could not find the game window for capture")
+            if rect is not None:
+                log(f"Game window client area at ({rect.left},{rect.top}) {rect.width}x{rect.height}, "
+                    f"frame offset ({rect.frame_left},{rect.frame_top})")
+            try:
+                _record_sequences(s, sequences, match, demo, settings, backend, caps, rect, out_dir, results, log,
+                                  cancel, on_progress, preroll_s=preroll)
+            finally:
+                s.restore_convars(previous)
+                s.set_hud(True)
+        ok = [r.path for r in results if r.path]
+        if settings.concat and len(ok) > 1:
+            final = out_dir / f"match_{match_id}_{int(time.time())}.mp4"
+            log("Concatenating clips …")
+            encode.concat(ok, final)
+            results.append(ClipResult(Sequence(match_id, 0, sum(r.duration_s for r in results), "All clips"), final,
+                                      encode.probe_duration(final)))
+        return results
+    except Exception as exc:
+        log(f"Recording failed: {exc}")
+        raise
+    finally:
+        cleanup_demo()
 
 
 def _record_sequences(s: GameSession, sequences: list[Sequence], match, demo, settings: RecordSettings, backend: str,
                       caps: Capabilities | None, rect, out_dir: Path, results: list[ClipResult], log: Progress,
-                      cancel: threading.Event | None, on_progress) -> None:
+                      cancel: threading.Event | None, on_progress, preroll_s: float = 0.0) -> None:
     install = s.install
     tick_rate = match.tick_rate or 64
     for i, seq in enumerate(sequences):
@@ -588,16 +684,26 @@ def _record_sequences(s: GameSession, sequences: list[Sequence], match, demo, se
         clip_name = f"clip{i + 1:02d}"
         start_tick, end_tick = seq.start_tick(match), seq.end_tick(match)
         try:
+            # Seek to a point *before* the clip, then let the demo play up to the start: after a long jump the
+            # engine is still streaming models, textures and addon skins, and capturing straight away gives a
+            # choppy clip with placeholder models.
+            preroll_ticks = int(preroll_s * tick_rate)
+            pre_tick = max(0, start_tick - preroll_ticks)
             s.console.send("demo_pause")
-            s.seek(start_tick, pause=True)
-            reached = s.wait_until_tick(start_tick - 2 * tick_rate, timeout=120)
-            if reached < 0 or abs(reached - start_tick) > 10 * tick_rate:
-                log(f"warning: seek landed at tick {reached}, wanted {start_tick}")
-            time.sleep(1.5)
+            s.seek(pre_tick, pause=True)
+            reached = s.wait_until_tick(pre_tick - 2 * tick_rate, timeout=120)
+            if reached < 0 or abs(reached - pre_tick) > 10 * tick_rate:
+                log(f"warning: seek landed at tick {reached}, wanted {pre_tick}")
+            time.sleep(2.0)
             s.spectate(seq, caps)
             s.set_hud(not settings.hide_hud and seq.hud)
             s.console.send(f"demo_timescale {seq.timescale}")
-            time.sleep(0.5)
+            if preroll_ticks > 0:
+                s.console.send("demo_resume")
+                s.wait_until_tick(start_tick - int(1.5 * tick_rate), timeout=preroll_s * 4 + 30)
+                s.console.send("demo_pause")
+                s.spectate(seq, caps)  # the camera target can drop during the pre-roll (deaths, respawns)
+                time.sleep(0.5)
             if backend == "engine":
                 rec = EngineRecorder(s.console, launcher.movie_dir(install), settings.fps, settings.width,
                                      settings.height)
@@ -613,13 +719,15 @@ def _record_sequences(s: GameSession, sequences: list[Sequence], match, demo, se
                 s.console.send("demo_pause")
                 path = _encode_engine_clip(files, clip_name, out_dir, settings, expected)
             elif backend == "window":
-                wrec = WindowRecorder(rect, settings.fps, settings.quality)  # type: ignore[arg-type]
+                wrec = WindowRecorder(rect, settings.fps, settings.quality,  # type: ignore[arg-type]
+                                      audio_pid=s.proc.pid if settings.audio else None, log=log)
                 wrec.start(out_dir / f"{clip_name}.mp4")
                 s.console.send("demo_resume")
                 s.wait_until_tick(end_tick, timeout=seq.duration_s / max(seq.timescale, 0.01) + 30)
                 s.console.send("demo_pause")
                 files = wrec.stop()
                 log(f"window capture: {wrec.frames_in} frames from the game, {wrec.frames_out} written")
+                _attach_audio(files, settings, log)
                 path = files.video
             else:
                 srec = ScreenRecorder(rect, settings.fps, settings.quality)  # type: ignore[arg-type]
@@ -638,6 +746,22 @@ def _record_sequences(s: GameSession, sequences: list[Sequence], match, demo, se
         except Exception as exc:  # noqa: BLE001
             log(f"Sequence failed: {exc}")
             results.append(ClipResult(seq, None, 0.0, str(exc)))
+
+
+def _attach_audio(files: ClipFiles, settings: RecordSettings, log: Progress) -> None:
+    """Mux the captured process audio into the clip; on any failure keep the silent clip."""
+    track = files.audio
+    if track is None or files.video is None:
+        return
+    try:
+        encode.mux_audio(files.video, track.path, sample_rate=track.sample_rate, channels=track.channels,
+                         lead_s=track.lead_s)
+        log(f"audio: {track.frames / track.sample_rate:.1f}s captured, lead {track.lead_s:+.3f}s, muxed")
+    except Exception as exc:  # noqa: BLE001
+        log(f"warning: keeping the silent clip, audio mux failed: {exc}")
+    finally:
+        if not settings.keep_frames:
+            track.path.unlink(missing_ok=True)
 
 
 def _encode_engine_clip(files: ClipFiles, clip_name: str, out_dir: Path, settings: RecordSettings,

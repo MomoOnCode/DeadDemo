@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from deaddemo.core.api.client import ReplayUnavailable
@@ -20,33 +21,39 @@ def start_download(ctx: AppContext, match_id: int) -> bool:
     if dest.exists():
         ctx.status(f"Match {match_id} is already in {dest_dir}")
         return False
-    try:
-        url = demo_url_for(match_id, db=ctx.db, use_gc=ctx.settings.use_steam_gc)
-    except ReplayUnavailable as exc:
-        ctx.status(str(exc), 12000)
-        return False
-    except Exception as exc:  # noqa: BLE001
-        ctx.status(f"Could not resolve replay URL for {match_id}: {exc}", 12000)
-        return False
-    row = ctx.downloads.create(match_id, url, str(dest))
+    # The URL is resolved inside the worker: it can mean a deadlock-api call or a Steam GC round trip
+    # (45 s handshake + 20 s per match), which used to freeze the GUI when done here.
+    row = ctx.downloads.create(match_id, "", str(dest))
     ctx.downloads.set_status(row.id, "running")
     ctx.events.downloads_changed.emit()
+    resolved: dict[str, str] = {}
+    db = ctx.db
+    use_gc = ctx.settings.use_steam_gc
 
     def work(progress, cancel):
-        last = [0]
+        progress(0, 0, "Resolving replay URL")
+        url = demo_url_for(match_id, db=db, use_gc=use_gc)
+        resolved["url"] = url
+        last_bytes, last_at = [0], [0.0]
 
         def on_progress(p: DownloadProgress) -> None:
-            if p.bytes_downloaded - last[0] > 4 << 20 or (p.bytes_total and p.bytes_downloaded == p.bytes_total):
-                last[0] = p.bytes_downloaded
+            now = time.monotonic()
+            finished = bool(p.bytes_total) and p.bytes_downloaded == p.bytes_total
+            if finished or (p.bytes_downloaded - last_bytes[0] > 4 << 20 and now - last_at[0] >= 0.5):
+                last_bytes[0], last_at[0] = p.bytes_downloaded, now
                 progress(p.bytes_downloaded, p.bytes_total or 0, f"{p.bytes_downloaded / 1e6:.0f} MB")
 
         return download_demo(url, dest, progress=on_progress, cancel=cancel)
 
     def on_progress(done: int, total: int, _msg: str) -> None:
+        if not done and not total:
+            return  # "resolving" notice, nothing to draw yet
         ctx.downloads.update_progress(row.id, done, total or None)
-        ctx.events.downloads_changed.emit()
+        ctx.events.download_progress.emit(row.id, done, total)  # the Downloads page repaints one row
 
     def on_finished(path: Path) -> None:
+        if resolved.get("url"):
+            ctx.downloads.set_url(row.id, resolved["url"])
         ctx.downloads.set_status(row.id, "done")
         ctx.events.downloads_changed.emit()
         ctx.status(f"Downloaded match {match_id}")
@@ -54,7 +61,13 @@ def start_download(ctx: AppContext, match_id: int) -> bool:
 
     def on_failed(err: str) -> None:
         first = err.splitlines()[0]
-        status = "cancelled" if "cancelled" in first.lower() or DownloadCancelled.__name__ in first else "failed"
+        if resolved.get("url"):
+            ctx.downloads.set_url(row.id, resolved["url"])
+        if ReplayUnavailable.__name__ in first:
+            status = "failed"
+            first = first.split(":", 1)[1].strip() if ":" in first else first
+        else:
+            status = "cancelled" if "cancelled" in first.lower() or DownloadCancelled.__name__ in first else "failed"
         ctx.downloads.set_status(row.id, status, error=first[:400])
         ctx.events.downloads_changed.emit()
         ctx.status(f"Download {status} for {match_id}: {first}", 12000)

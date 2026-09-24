@@ -17,8 +17,10 @@ from PySide6.QtWidgets import (
 )
 
 from deaddemo.core.assets.catalog import catalog
+from deaddemo.core.db.repos import HistoryRow
 from deaddemo.gui.context import AppContext
 from deaddemo.gui.models.matches_model import MatchesModel, MatchListRow
+from deaddemo.gui.util import debounced
 
 
 class MatchesPage(QWidget):
@@ -75,9 +77,11 @@ class MatchesPage(QWidget):
         self.btn_open.clicked.connect(self._open_selected)
         self.btn_parse.clicked.connect(self._parse_selected)
         self.search.textChanged.connect(self.proxy.setFilterFixedString)
+        reload = debounced(self, self.reload)
         for sig in (ctx.events.history_changed, ctx.events.demos_changed, ctx.events.matches_changed,
                     ctx.events.downloads_changed, ctx.events.settings_changed):
-            sig.connect(self.reload)
+            sig.connect(reload)
+        self._sized_rows = -1
         self.reload()
 
     # -- data ------------------------------------------------------------------------
@@ -88,21 +92,37 @@ class MatchesPage(QWidget):
             self.info.setText("No Steam account detected. Set an account id in Settings.")
             return
         history = self.ctx.history.for_account(acct.account_id)
-        local_ids = {d.match_id for d in self.ctx.demos.all() if d.match_id and d.status in ("found", "parsed")}
+        demos = [d for d in self.ctx.demos.all() if d.match_id and d.status in ("found", "parsed")]
+        local_ids = {d.match_id for d in demos}
         parsed_ids = {m.match_id for m in self.ctx.matches.all()}
         active = self.ctx.downloads.active_match_ids()
+        awards = self.ctx.awards.for_account(acct.account_id)
+        # matches we analyzed with this account in them but which no history source reported (yet)
+        known = {h.match_id for h in history}
+        demo_mtime = {d.match_id: int(d.mtime) for d in demos}
+        for match, player in self.ctx.matches.played_by(acct.steam_id64):
+            if match.match_id not in known:
+                history.append(HistoryRow.from_parsed(match, player, demo_mtime.get(match.match_id)))
         cat = catalog()
+        salt_known = self.ctx.history.replay_salt_known()  # one query instead of one per row
         rows = []
         for h in history:
-            salts = self.ctx.history.salts(h.match_id)
-            known = None if salts is None else bool(salts.replay_salt)
+            known = salt_known.get(h.match_id)
+            award = awards.get(h.match_id)
             rows.append(MatchListRow(h, cat.hero_name(h.hero_id), h.match_id in local_ids, h.match_id in parsed_ids,
-                                     h.match_id in active, known))
+                                     h.match_id in active, known, award.label if award else ""))
         self.model.set_rows(rows)
-        self.table.resizeColumnsToContents()
+        if len(rows) != self._sized_rows:  # measuring 500+ rows x 11 columns is the slow part of a reload
+            self.table.resizeColumnsToContents()
+            self._sized_rows = len(rows)
         wins = sum(1 for r in rows if r.won)
-        self.info.setText(f"{acct.persona_name}: {len(rows)} matches, {wins} wins, "
-                          f"{sum(1 for r in rows if r.local)} local, {sum(1 for r in rows if r.parsed)} analyzed")
+        gc_only = sum(1 for r in rows if r.history.source == "gc")
+        local_only = sum(1 for r in rows if r.history.source == "parsed")
+        extra = (f", {gc_only} only via Steam GC" if gc_only else "") + \
+                (f", {local_only} only local" if local_only else "")
+        n_local, n_parsed = sum(1 for r in rows if r.local), sum(1 for r in rows if r.parsed)
+        self.info.setText(f"{acct.persona_name}: {len(rows)} matches, {wins} wins, {n_local} local, "
+                          f"{n_parsed} analyzed{extra}")
 
     def selected(self) -> list[MatchListRow]:
         out = []
@@ -120,25 +140,49 @@ class MatchesPage(QWidget):
         if not acct:
             self.ctx.status("No Steam account detected; set an account id in Settings", 8000)
             return
-        from deaddemo.core.api.client import default_client
+        import logging
+        import time
 
+        from deaddemo.core.api.client import default_client
+        from deaddemo.core.api.service import apply_history, fetch_history_sources, should_force_refetch
+
+        log = logging.getLogger("deaddemo.history")
         client = default_client()
         account_id = acct.account_id
+        settings = self.ctx.settings
+        if not force:
+            # local evidence newer than anything deadlock-api lists? then ask it to re-pull from Valve
+            newest_local = max([int(d.mtime) for d in self.ctx.demos.all() if d.match_id] or [0]) or None
+            force = should_force_refetch(self.ctx.history.newest_start_time(account_id), newest_local,
+                                         settings.history_last_force_ts, time.time())
+            if force:
+                log.info("forcing a Valve refetch: local demos are newer than the API history")
+        use_gc = settings.use_steam_gc
 
         def work(progress, cancel):
-            progress(0, 0, "Fetching match history")
-            entries = client.match_history(account_id, force_refetch=force)
+            fetch = fetch_history_sources(account_id, client=client, force_api=force, use_gc=use_gc,
+                                          progress=progress)
             catalog().load_api()
-            return entries
+            return fetch
 
-        def done(entries):
-            entries.sort(key=lambda e: e.start_time or 0, reverse=True)
-            n = self.ctx.history.upsert_many(account_id, [e.to_dict() for e in entries])
-            self.ctx.status(f"Match history updated: {n} matches")
+        def done(fetch):
+            n_api, n_gc = apply_history(self.ctx.db, fetch)
+            if fetch.forced:
+                settings.history_last_force_ts = time.time()
+                settings.save()
+            msg = f"Match history updated: {len(fetch.api_entries)} from deadlock-api"
+            if n_gc:
+                msg += f", {n_gc} more from Steam"
+            if fetch.notes:
+                msg += " (" + "; ".join(fetch.notes) + ")"
+            self.ctx.status(msg, 12000)
             self.ctx.events.history_changed.emit()
 
-        self.ctx.jobs.submit("history", work, on_finished=done,
-                             on_failed=lambda e: self.ctx.status(f"History refresh failed: {e.splitlines()[0]}", 12000))
+        def failed(e: str):
+            log.error("history refresh failed: %s", e.splitlines()[0])
+            self.ctx.status(f"History refresh failed: {e.splitlines()[0]}", 12000)
+
+        self.ctx.jobs.submit("history", work, on_finished=done, on_failed=failed)
 
     def _download_selected(self) -> None:
 

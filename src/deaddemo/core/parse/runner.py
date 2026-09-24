@@ -87,6 +87,14 @@ def parse_and_store(
         store_result(db, demo, result)
         if progress:
             progress(f"stored match {result.match_id}")
+        try:  # best effort: MVP / Key Player from deadlock-api's match metadata
+            from deaddemo.core.api.awards import store_awards
+
+            rows = store_awards(db, result.match_id)
+            if progress:
+                progress(f"awards: {'stored' if rows else 'not available yet'}")
+        except Exception as exc:  # noqa: BLE001 - network is optional here
+            result.warnings.append(f"awards: {type(exc).__name__}: {exc}")
         return result
     finally:
         if own_db:

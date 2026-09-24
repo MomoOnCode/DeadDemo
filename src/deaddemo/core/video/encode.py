@@ -77,6 +77,37 @@ def screen_capture_args(rect, fps: int, out: Path, *, quality: str = "high") -> 
             "-movflags", "+faststart", str(out)]
 
 
+def audio_offset_filter(lead_s: float) -> list[str]:
+    """``lead_s`` is audio captured before the video's first frame: trim it; negative means the audio
+    started late, so pad the front."""
+    if lead_s >= 0.001:
+        return ["-af", f"atrim=start={lead_s:.4f},asetpts=PTS-STARTPTS"]
+    if lead_s <= -0.001:
+        return ["-af", f"adelay={round(-lead_s * 1000)}:all=1"]
+    return []
+
+
+def mux_audio_args(video: Path, audio_raw: Path, out: Path, *, sample_rate: int, channels: int,
+                   lead_s: float) -> list[str]:
+    """Copy the video stream and add a raw s16le PCM file as an AAC track, cut to the shorter of the two."""
+    return ["-i", str(video), "-f", "s16le", "-ar", str(sample_rate), "-ac", str(channels), "-i", str(audio_raw),
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", *audio_offset_filter(lead_s),
+            "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(out)]
+
+
+def mux_audio(video: Path, audio_raw: Path, *, sample_rate: int, channels: int, lead_s: float) -> None:
+    """Replace ``video`` with a copy that carries the audio track (written next to it first)."""
+    import os
+
+    tmp = video.with_name(video.stem + ".mux.mp4")
+    r = _run(mux_audio_args(video, audio_raw, tmp, sample_rate=sample_rate, channels=channels, lead_s=lead_s),
+             timeout=600)
+    if r.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg audio mux failed: {r.stderr[-800:]}")
+    os.replace(tmp, video)
+
+
 def concat(files: list[Path], out: Path) -> None:
     lst = out.with_suffix(".txt")
     lst.write_text("".join(f"file '{f.as_posix()}'\n" for f in files), encoding="utf-8")

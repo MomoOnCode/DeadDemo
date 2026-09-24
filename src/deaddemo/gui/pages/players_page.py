@@ -119,7 +119,9 @@ class PlayersPage(QWidget):
         self.search.textChanged.connect(self.proxy.setFilterFixedString)
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._show_player())
         self.table.doubleClicked.connect(lambda _i: self._open_profile())
-        ctx.events.matches_changed.connect(self.reload)
+        from deaddemo.gui.util import debounced
+
+        ctx.events.matches_changed.connect(debounced(self, self.reload, 300))
         self.reload()
 
     def reload(self) -> None:

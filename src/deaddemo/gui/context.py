@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 from deaddemo.core.db.database import Database
 from deaddemo.core.db.repos import (
+    AwardsRepo,
     CalibrationRepo,
     DemoRepo,
     DownloadRepo,
@@ -31,6 +32,7 @@ class AppEvents(QObject):
     matches_changed = Signal()
     history_changed = Signal()
     downloads_changed = Signal()
+    download_progress = Signal(int, int, int)  # download row id, bytes done, bytes total (0 = unknown)
     videos_changed = Signal()
     settings_changed = Signal()
     status_message = Signal(str, int)  # message, timeout ms
@@ -56,12 +58,14 @@ class AppContext:
     player_notes: PlayerNotesRepo = field(init=False)
     sequences: SequenceRepo = field(init=False)
     videos: VideoRepo = field(init=False)
+    awards: AwardsRepo = field(init=False)
 
     def __post_init__(self) -> None:
         from deaddemo.core.video.sequences import SequenceRepo, VideoRepo
 
         self.sequences = SequenceRepo(self.db)
         self.videos = VideoRepo(self.db)
+        self.awards = AwardsRepo(self.db)
         self.demos = DemoRepo(self.db)
         self.matches = MatchRepo(self.db)
         self.history = HistoryRepo(self.db)

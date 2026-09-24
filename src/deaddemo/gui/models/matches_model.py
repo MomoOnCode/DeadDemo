@@ -18,6 +18,7 @@ class MatchListRow:
     parsed: bool
     downloading: bool
     salts_known: bool | None  # None = not checked yet
+    award: str = ""  # "MVP" / "Key Player" for this account, when the match metadata has been fetched
 
     @property
     def match_id(self) -> int:
@@ -32,10 +33,13 @@ class MatchListRow:
 
     @property
     def state(self) -> str:
+        src = self.history.source
         if self.parsed:
-            return "analyzed"
+            return "analyzed (not on deadlock-api)" if src == "parsed" else "analyzed"
         if self.local:
             return "local"
+        if src == "gc":
+            return "via Steam GC" if self.salts_known is not False else "no replay"
         if self.downloading:
             return "downloading"
         if self.salts_known is False:
@@ -64,6 +68,7 @@ class MatchesModel(RowTableModel):
                 Column("Match", lambda r: r.match_id, align_right=True),
                 Column("Hero", lambda r: r.hero_name),
                 Column("Result", lambda r: r.won, lambda v: "" if v is None else ("Win" if v else "Loss")),
+                Column("Award", lambda r: r.award),
                 Column("K/D/A", lambda r: r.history.player_kills or 0,
                        lambda v: "", align_right=True),
                 Column("Souls", lambda r: r.history.net_worth, fmt_souls, align_right=True),
@@ -74,8 +79,9 @@ class MatchesModel(RowTableModel):
             parent,
         )
         # K/D/A needs the whole row; patch the formatter via a closure over the getter.
-        self.columns[5] = Column("K/D/A", lambda r: r, lambda r: _kda(r), align_right=True,
-                                 sort_key=lambda r: r.history.player_kills or 0)
+        kda_index = next(i for i, c in enumerate(self.columns) if c.header == "K/D/A")
+        self.columns[kda_index] = Column("K/D/A", lambda r: r, lambda r: _kda(r), align_right=True,
+                                         sort_key=lambda r: r.history.player_kills or 0)
 
     def row_background(self, row: MatchListRow) -> QColor | None:
         if row.parsed:

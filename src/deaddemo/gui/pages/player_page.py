@@ -313,6 +313,13 @@ class PlayerPage(QWidget):
                             ("Losses", str(p.hist_matches - (p.hist_wins or 0)))], "all matches deadlock-api knows"))
             t.add(StatTile("Avg K/D/A (history)", f"{k:.1f}/{d:.1f}/{a:.1f}",
                            [("Souls/min", _n(p.hist_souls_per_min))]))
+        awards = self.ctx.awards.for_account(p.account_id)
+        if awards:
+            mvps = sum(1 for a in awards.values() if a.mvp_rank == 1)
+            keys = sum(1 for a in awards.values() if a.mvp_rank and a.mvp_rank > 1)
+            t.add(StatTile("Awards", str(mvps + keys),
+                           [("MVP", str(mvps)), ("Key Player", str(keys)), ("Rated matches", str(len(awards)))],
+                           "post-game awards in matches with metadata"))
         t.add(StatTile("Win ratio (analyzed)", _pct(p.winrate if p.games else None),
                        [("Games", str(p.games)), ("Wins", str(p.wins)), ("Losses", str(p.games - p.wins)),
                         ("Minutes", _n(p.minutes_played))], "from analyzed games"))

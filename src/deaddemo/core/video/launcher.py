@@ -70,6 +70,19 @@ def citadel_dir(install: SteamInstall) -> Path:
     return install.deadlock_dir / "game" / "citadel"
 
 
+def addon_vpk_count(install: SteamInstall) -> int:
+    """How many addon VPKs the game will mount: mods live in game/citadel/addons and only count when
+    gameinfo.gi lists that folder as a search path (Deadlock Mod Manager writes that entry)."""
+    if not install.deadlock_dir:
+        return 0
+    try:
+        if b"citadel/addons" not in gameinfo_path(install).read_bytes():
+            return 0
+        return sum(1 for p in (citadel_dir(install) / "addons").glob("*.vpk") if p.is_file())
+    except OSError:
+        return 0
+
+
 def _sha256(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
@@ -123,6 +136,82 @@ class ConfigGuard:
                         raise
                     time.sleep(delay_s)
         return restored
+
+
+GPU_PREFS_KEY = r"Software\Microsoft\DirectX\UserGpuPreferences"
+AUTO_HDR_ON, AUTO_HDR_OFF = "2097", "2096"  # the values Windows' Graphics settings page writes per app
+
+
+def set_pref(existing: str | None, name: str, value: str) -> str:
+    """Rewrite one ``name=value;`` entry of a UserGpuPreferences string, keeping the others."""
+    items = [kv for kv in (existing or "").split(";") if kv.strip()]
+    out, done = [], False
+    for kv in items:
+        k, _, _v = kv.partition("=")
+        if k == name:
+            out.append(f"{name}={value}")
+            done = True
+        else:
+            out.append(kv)
+    if not done:
+        out.append(f"{name}={value}")
+    return ";".join(out) + ";"
+
+
+class AutoHdrGuard:
+    """Turn Windows Auto HDR off for one executable while we record, then restore the previous entry.
+
+    With Auto HDR on, Windows composes the game as HDR and Windows Graphics Capture only hands out 8-bit
+    frames, so clips come out blown-out and washed. The per-app switch lives in
+    ``HKCU\\Software\\Microsoft\\DirectX\\UserGpuPreferences`` under the exe's full path and is read when
+    the process starts. On other platforms this is a no-op."""
+
+    def __init__(self, exe: Path, key: str = GPU_PREFS_KEY):
+        self.exe = str(exe)
+        self.key = key
+        self.original: str | None = None
+        self.existed = False
+        self.changed = False
+
+    def _read(self) -> str | None:
+        import winreg
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.key) as k:
+                value, _ = winreg.QueryValueEx(k, self.exe)
+                return str(value)
+        except FileNotFoundError:
+            return None
+
+    def _write(self, value: str | None) -> None:
+        import winreg
+
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, self.key) as k:
+            if value is None:
+                try:
+                    winreg.DeleteValue(k, self.exe)
+                except FileNotFoundError:
+                    pass
+            else:
+                winreg.SetValueEx(k, self.exe, 0, winreg.REG_SZ, value)
+
+    def disable(self) -> bool:
+        """Returns True when the entry was changed (Auto HDR was on or unset for this exe)."""
+        if sys.platform != "win32":
+            return False
+        self.original = self._read()
+        self.existed = self.original is not None
+        if self.original and f"AutoHDREnable={AUTO_HDR_OFF}" in self.original:
+            return False
+        self._write(set_pref(self.original, "AutoHDREnable", AUTO_HDR_OFF))
+        self.changed = True
+        return True
+
+    def restore(self) -> None:
+        if not self.changed:
+            return
+        self._write(self.original if self.existed else None)
+        self.changed = False
 
 
 class GameInfoUnlock:

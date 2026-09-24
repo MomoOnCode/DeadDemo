@@ -8,6 +8,19 @@ from typing import Any
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QBrush, QColor
+from PySide6.QtWidgets import QHeaderView, QTableView
+
+
+def configure_columns(view: QTableView, *, content_columns: Sequence[int] = ()) -> None:
+    """Share the width evenly between columns instead of letting the last one swallow the leftover.
+
+    ``content_columns`` (e.g. name columns) are sized to their text; every other column stretches by the
+    same amount. Call once after the model is set; no ``resizeColumnsToContents()`` needed afterwards."""
+    header = view.horizontalHeader()
+    header.setStretchLastSection(False)
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    for c in content_columns:
+        header.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
 
 
 @dataclass

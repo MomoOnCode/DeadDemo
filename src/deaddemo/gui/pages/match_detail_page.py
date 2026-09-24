@@ -5,13 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -24,20 +23,26 @@ from PySide6.QtWidgets import (
 )
 
 from deaddemo.core.assets.catalog import catalog
-from deaddemo.core.db.repos import MatchPlayerRow, MatchRow
+from deaddemo.core.db.repos import AwardRow, MatchPlayerRow, MatchRow
 from deaddemo.core.stats import match_stats
+from deaddemo.core.stats.chat_format import ChatPlayer, chat_html
 from deaddemo.gui.context import AppContext
-from deaddemo.gui.models.table_model import Column, RowTableModel
-from deaddemo.gui.theme import TEAM_COLORS, fmt_clock, fmt_souls, team_color, team_name
+from deaddemo.gui.models.table_model import Column, RowTableModel, configure_columns
+from deaddemo.gui.theme import TEAM_COLORS, TEAM_COLORS_DIM, TEAM_NAMES, fmt_clock, fmt_souls, team_color, team_name
 
 
 class ScoreboardModel(RowTableModel):
+    AWARD_COLUMN = 2
+
     def __init__(self, parent=None):
         cat = catalog()
+        self.awards: dict[int, AwardRow] = {}  # hero_id -> post-game award (set by the page)
         super().__init__(
             [
                 Column("Player", lambda r: r.player_name),
                 Column("Hero", lambda r: cat.hero_name(r.hero_id)),
+                Column("Award", lambda r: self._award(r), lambda a: a.label if a else "",
+                       sort_key=lambda r: (self._award(r).mvp_rank or 9) if self._award(r) else 9),
                 Column("Lane", lambda r: r.start_lane, align_right=True),
                 Column("Lvl", lambda r: r.level, align_right=True),
                 Column("K", lambda r: r.kills, align_right=True),
@@ -53,6 +58,34 @@ class ScoreboardModel(RowTableModel):
             ],
             parent,
         )
+
+    def _award(self, row: MatchPlayerRow) -> AwardRow | None:
+        return self.awards.get(row.hero_id)
+
+    def set_awards(self, awards: dict[int, AwardRow]) -> None:
+        self.awards = awards
+        if self.rows:
+            top_left = self.index(0, self.AWARD_COLUMN)
+            self.dataChanged.emit(top_left, self.index(len(self.rows) - 1, self.AWARD_COLUMN))
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.ToolTipRole and index.isValid() and index.column() == self.AWARD_COLUMN:
+            a = self._award(self.rows[index.row()])
+            if a is None:
+                return None
+            cat = catalog()
+            lines = [f"{a.label} (MVP rank {a.mvp_rank})"] if a.mvp_rank else []
+            for acc in a.accolades:
+                stars = "★" * max(1, int(acc.get("stars") or 1))
+                value = acc.get("value")
+                lines.append(f"{stars} {cat.accolade_name(acc.get('id'))}: {value:,}" if isinstance(value, int)
+                             else f"{stars} {cat.accolade_name(acc.get('id'))}")
+            return "\n".join(lines) or None
+        if role == Qt.ItemDataRole.ForegroundRole and index.isValid() and index.column() == self.AWARD_COLUMN:
+            a = self._award(self.rows[index.row()])
+            if a and a.mvp_rank:
+                return QBrush(QColor("#ffd766" if a.mvp_rank == 1 else "#d0d0d0"))
+        return super().data(index, role)
 
     def row_background(self, row: MatchPlayerRow) -> QColor | None:
         c = QColor(team_color(row.team_num))
@@ -103,8 +136,7 @@ class MatchDetailPage(QWidget):
             table.setModel(model)
             table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             table.verticalHeader().setVisible(False)
-            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            table.horizontalHeader().setStretchLastSection(True)
+            configure_columns(table, content_columns=(0, 1))  # names fit their text, numbers share the rest
             table.setMaximumHeight(220)
             table.doubleClicked.connect(lambda idx, m=model: self._open_player(m.row_at(idx)))
             table.setToolTip("Double-click a player for their profile")
@@ -164,7 +196,7 @@ class MatchDetailPage(QWidget):
         self.dmg_table = QTableView()
         self.dmg_table.setModel(self.dmg_model)
         self.dmg_table.verticalHeader().setVisible(False)
-        self.dmg_table.horizontalHeader().setStretchLastSection(True)
+        configure_columns(self.dmg_table)
         dml.addWidget(self.dmg_table, 1)
         self.tabs.addTab(dmg, "Damage")
 
@@ -217,13 +249,46 @@ class MatchDetailPage(QWidget):
             f"Match {m.match_id} — {m.map_name} — {fmt_clock(m.regulation_seconds)} — {winner} won"
             f" — build {m.build} — analyzed with boon {m.boon_version}"
         )
+        awards = self.ctx.awards.for_match(match_id)
         for team, model in self.board_models.items():
+            model.set_awards(awards)
             model.set_rows([p for p in self.players if p.team_num == team])
-            self.board_tables[team].resizeColumnsToContents()
+        if awards:
+            self._ensure_accolade_names()
+        else:
+            self._fetch_awards(match_id)
         self.tags_edit.setText(", ".join(t.name for t in self.ctx.tags.tags_for_match(match_id)))
         self.comment_edit.setPlainText(self.ctx.tags.comment(match_id))
         self._loaded_tabs = set()
         self._tab_changed(self.tabs.currentIndex())
+
+    def _fetch_awards(self, match_id: int) -> None:
+        """MVP / Key Player come from deadlock-api's match metadata; fetch once, store, refresh the boards."""
+        if self.ctx.jobs.is_running(f"awards:{match_id}"):
+            return
+        from deaddemo.core.api.awards import fetch_match_awards
+
+        def work(progress, cancel):
+            catalog().load_accolades()
+            return fetch_match_awards(match_id)
+
+        def done(rows):
+            if not rows or self.match is None or self.match.match_id != match_id:
+                return
+            self.ctx.awards.upsert(match_id, rows)
+            awards = self.ctx.awards.for_match(match_id)
+            for model in self.board_models.values():
+                model.set_awards(awards)
+            self.ctx.events.matches_changed.emit()
+
+        self.ctx.jobs.submit(f"awards:{match_id}", work, on_finished=done,
+                             on_failed=lambda e: self.ctx.status(f"Awards lookup failed: {e.splitlines()[0]}", 8000))
+
+    def _ensure_accolade_names(self) -> None:
+        if catalog()._accolades is not None or self.ctx.jobs.is_running("accolade-names"):
+            return
+        self.ctx.jobs.submit("accolade-names", lambda progress, cancel: catalog().load_accolades(),
+                             on_finished=lambda _ok: None, on_failed=lambda _e: None)
 
     def _tab_changed(self, index: int) -> None:
         if self.match is None or index in self._loaded_tabs:
@@ -266,18 +331,19 @@ class MatchDetailPage(QWidget):
         names = {p.hero_id: p.player_name for p in self.players}
         rows = [{**r, "player_name": names.get(r["hero_id"], "")} for r in df.to_dicts()] if df.height else []
         self.dmg_model.set_rows(rows)
-        self.dmg_table.resizeColumnsToContents()
 
     def _fill_chat(self) -> None:
         if not self.match:
             return
         df = match_stats.chat(self.match)
-        cat = catalog()
-        lines = []
-        for r in (df.to_dicts() if df.height else []):
-            t = fmt_clock(r.get("match_seconds"))
-            lines.append(f"[{t}] ({r.get('chat_type')}) {cat.hero_name(r.get('hero_id'))}: {r.get('text')}")
-        self.chat_view.setPlainText("\n".join(lines) or "No chat in this demo (or 'chat' dataset not stored).")
+        rows = df.to_dicts() if df.height else []
+        if not rows:
+            self.chat_view.setPlainText("No chat in this demo (or 'chat' dataset not stored).")
+            return
+        players = {p.hero_id: ChatPlayer(p.player_name or "", p.team_num) for p in self.players}
+        colors = {t: c.name() for t, c in TEAM_COLORS.items()}
+        dim = {t: c.name() for t, c in TEAM_COLORS_DIM.items()}
+        self.chat_view.setHtml(chat_html(rows, players, catalog().hero_name, colors, dim, TEAM_NAMES))
 
     def _timeline_to_clip(self, index) -> None:
         """Double-click a timeline event to turn it into a clip sequence."""

@@ -8,6 +8,8 @@ Contract with the helper (all secrets travel through environment variables, neve
   Prints one JSON object per line: {"match_id", "result", "replay_salt", "metadata_salt",
   "cluster_id", "replay_valid_through"}; ``result`` is "success" or a k_eResult_* name.
 * ``deaddemo-gc status``  env as for salts. Prints {"ok": bool, "steam_id64", "error"}.
+* ``deaddemo-gc history <account_id> [max_pages]``  env as for salts. One JSON object per match of the
+  account's own match history (what the in-game history screen shows), newest first.
 
 The refresh token is stored encrypted (DPAPI on Windows) in the app data dir by ``secrets``.
 """
@@ -247,3 +249,32 @@ def fetch_salts(match_ids: list[int]) -> list[GcSalts]:
     if proc.returncode != 0 and not results:
         raise GcError(_error_text(proc))
     return results
+
+
+def fetch_history(account_id: int, max_pages: int = 5) -> list[dict]:
+    """The account's match history from the GC (authoritative, independent of deadlock-api's ingest).
+
+    Costs one quota unit per page. Needs the game closed for the same reason as ``fetch_salts``."""
+    remaining = DAILY_LIMIT - quota_used_today()
+    if remaining <= 0:
+        raise GcError(f"Daily Steam GC quota ({DAILY_LIMIT}) reached; try again tomorrow")
+    pages = max(1, min(max_pages, remaining))
+    env = _auth_env()
+    if game_running():
+        raise GcError("Deadlock is running; Steam sends Game Coordinator replies to the game. Close it and retry.")
+    proc = _run(["history", str(account_id), str(pages)], env, timeout=90.0 + 50 * pages)
+    _bump_quota(pages)
+    entries: list[dict] = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("match_id"):
+            entries.append(d)
+    if proc.returncode != 0 and not entries:
+        raise GcError(_error_text(proc))
+    return entries

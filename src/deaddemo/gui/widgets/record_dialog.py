@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -54,7 +55,7 @@ class RecordDialog(QDialog):
         self.quality.addItems(["low", "medium", "high", "max"])
         self.quality.setCurrentText(s.video_quality)
         self.backend = QComboBox()
-        self.backend.addItem("window — capture the game window even while other windows cover it (no audio)",
+        self.backend.addItem("window — capture the game window even while other windows cover it (game audio)",
                              "window")
         self.backend.addItem("screen — desktop duplication; the game must stay on top (no audio)", "screen")
         self.backend.addItem("engine — startmovie (experimental; blocked on current builds)", "engine")
@@ -64,6 +65,16 @@ class RecordDialog(QDialog):
                 self.backend.setCurrentIndex(i)
         self.hide_hud = QCheckBox("Hide HUD")
         self.hide_hud.setChecked(s.video_hide_hud)
+        self.audio = QCheckBox("Game audio (deadlock.exe only; window recorder)")
+        self.audio.setChecked(s.video_audio)
+        self.hdr_off = QCheckBox("Turn Auto HDR off for the game while recording (fixes blown-out clips)")
+        self.hdr_off.setChecked(s.video_auto_hdr_off)
+        self.preroll = QDoubleSpinBox()
+        self.preroll.setRange(0, 60)
+        self.preroll.setValue(s.video_preroll_s)
+        self.preroll.setSuffix(" s")
+        self.preroll.setToolTip("The demo plays this long before each clip so models, textures and skin mods finish "
+                                "loading before capture starts. Installs with addon VPKs get 6 s more automatically.")
         self.concat = QCheckBox("Also join all clips into one file")
         self.concat.setChecked(s.video_concat)
         self.limit = QSpinBox()
@@ -74,7 +85,10 @@ class RecordDialog(QDialog):
         form.addRow("Quality", self.quality)
         form.addRow("Recorder", self.backend)
         form.addRow("", self.hide_hud)
+        form.addRow("", self.audio)
+        form.addRow("", self.hdr_off)
         form.addRow("", self.concat)
+        form.addRow("Pre-roll before each clip", self.preroll)
         form.addRow("Clips to record", self.limit)
         caps = director.Capabilities.load()
         if caps:
@@ -86,7 +100,9 @@ class RecordDialog(QDialog):
         note = QLabel(
             txt + "\n\nThe game is launched through Steam with -insecure and driven over its remote console; the "
             "window is captured in real time at the chosen size; with the window backend you may keep using the PC, "
-            "just do not minimize or resize the game. Close Deadlock first. Your video settings (cfg/video.txt) "
+            "just do not minimize or resize the game. Game audio is captured from deadlock.exe alone (Windows "
+            "process loopback), so Discord and music stay out. Close Deadlock first. Your video settings "
+            "(cfg/video.txt) "
             "and machine convars are snapshotted before the launch and restored once the game has exited. "
             "The engine recorder additionally "
             "edits game/citadel/gameinfo.gi for one launch and restores it."
@@ -122,8 +138,9 @@ class RecordDialog(QDialog):
         return director.RecordSettings(width=w, height=h, fps=int(self.fps.currentText()),
                                        quality=self.quality.currentText(), backend=self.backend.currentData(),
                                        hide_hud=self.hide_hud.isChecked(), concat=self.concat.isChecked(),
+                                       audio=self.audio.isChecked(), auto_hdr_off=self.hdr_off.isChecked(),
                                        output_dir=s.resolved_video_dir(), vcon_port=s.vconsole_port,
-                                       launch_mode=s.video_launch_mode)
+                                       launch_mode=s.video_launch_mode, preroll_s=self.preroll.value())
 
     def _start(self) -> None:
         rs = self._settings()
@@ -131,6 +148,9 @@ class RecordDialog(QDialog):
         s.video_width, s.video_height, s.video_fps = rs.width, rs.height, rs.fps
         s.video_quality, s.video_backend, s.video_hide_hud, s.video_concat = (rs.quality, rs.backend, rs.hide_hud,
                                                                               rs.concat)
+        s.video_audio = rs.audio
+        s.video_auto_hdr_off = rs.auto_hdr_off
+        s.video_preroll_s = rs.preroll_s
         s.save()
         seqs = self.sequences[: self.limit.value()]
         self.cancel.clear()

@@ -10,7 +10,7 @@ from deaddemo.core.db.repos import MatchRepo, MatchRow
 from deaddemo.core.stats.extras import MULTI_KILL_WINDOW_S
 from deaddemo.core.stats.match_stats import scan
 
-KINDS = ("kills", "deaths", "multikills", "first_blood", "teamfights", "objectives", "midboss")
+KINDS = ("kills", "bursts", "deaths", "multikills", "first_blood", "teamfights", "objectives", "midboss")
 CAMERAS = ("chase", "in_eye", "free")
 
 
@@ -49,10 +49,25 @@ class GenerateOptions:
     lead_in_s: float = 6.0
     lead_out_s: float = 3.0
     merge_gap_s: float = 2.0
+    chain_kills_s: float = 10.0  # a kill this soon after the previous one extends the same clip
+    burst_min_events: int = 2  # "bursts": at least this many of my kills + assists ...
+    burst_window_s: float = 10.0  # ... each within this many seconds of the previous one
     min_teamfight_kills: int = 2
     max_sequences: int = 40
     camera: str = "chase"
     hud: bool = False
+
+
+def chain_events(events: list[dict], window_s: float) -> list[list[dict]]:
+    """Group time-sorted events so that each one within ``window_s`` of the previous joins its chain."""
+    chains: list[list[dict]] = []
+    for e in sorted(events, key=lambda k: float(k["match_seconds"] or 0)):
+        t = float(e["match_seconds"] or 0)
+        if chains and t - float(chains[-1][-1]["match_seconds"] or 0) <= window_s:
+            chains[-1].append(e)
+        else:
+            chains.append([e])
+    return chains
 
 
 def _merge(ranges: list[tuple[float, float, str]], gap: float) -> list[tuple[float, float, str]]:
@@ -88,8 +103,28 @@ def generate(db: Database, match: MatchRow, hero_id: int, opts: GenerateOptions,
 
     my_kills = [k for k in kills if k["attacker_hero_id"] == hero_id]
     if "kills" in opts.kinds:
-        for k in my_kills:
-            add(float(k["match_seconds"] or 0), f"Kill on {hero_name(k['victim_hero_id'])}")
+        for chain in chain_events(my_kills, opts.chain_kills_s):
+            victims = [hero_name(k["victim_hero_id"]) for k in chain]
+            first, last = float(chain[0]["match_seconds"] or 0), float(chain[-1]["match_seconds"] or 0)
+            label = f"Kill on {victims[0]}" if len(chain) == 1 else "Kills on " + ", ".join(victims)
+            add(first, label, after=(last - first) + opts.lead_out_s)
+    if "bursts" in opts.kinds:
+        # moments of heavy involvement: my kills and my assists, two or more in quick succession
+        def assisted(k: dict) -> bool:
+            ids = k.get("assister_hero_ids") or "[]"
+            return hero_id in (json.loads(ids) if isinstance(ids, str) else ids)
+
+        involved = [dict(k, mine=(k["attacker_hero_id"] == hero_id)) for k in kills
+                    if k["attacker_hero_id"] == hero_id or assisted(k)]
+        for chain in chain_events(involved, opts.burst_window_s):
+            if len(chain) < opts.burst_min_events:
+                continue
+            n_kills = sum(1 for k in chain if k["mine"])
+            n_assists = len(chain) - n_kills
+            parts = [f"{n_kills} kill{'s' if n_kills != 1 else ''}"] if n_kills else []
+            parts += [f"{n_assists} assist{'s' if n_assists != 1 else ''}"] if n_assists else []
+            first, last = float(chain[0]["match_seconds"] or 0), float(chain[-1]["match_seconds"] or 0)
+            add(first, "Burst: " + " + ".join(parts), after=(last - first) + opts.lead_out_s)
     if "deaths" in opts.kinds:
         for k in kills:
             if k["victim_hero_id"] == hero_id:

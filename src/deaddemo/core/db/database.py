@@ -14,7 +14,9 @@ from pathlib import Path
 
 from deaddemo import paths
 
-SCHEMA_VERSION = 3  # 2: match_player_extras, player_notes; 3: sequences, videos (schema.sql is idempotent)
+SCHEMA_VERSION = 5  # 2: extras, player_notes; 3: sequences, videos; 4: match_awards; 5: api_match_history.source
+# Columns added to existing tables after their CREATE TABLE shipped (schema.sql only creates; this alters).
+_ADDED_COLUMNS = (("api_match_history", "source", "TEXT"),)
 _SCHEMA_FILE = Path(__file__).with_name("schema.sql")
 
 
@@ -62,12 +64,18 @@ class Database:
         self.conn.executescript(_SCHEMA_FILE.read_text(encoding="utf-8"))
         current = self.schema_version()
         if current is None or current < SCHEMA_VERSION:
-            # Future migrations go here, keyed on `current`.
             with self.transaction():
+                for table, column, decl in _ADDED_COLUMNS:
+                    self._ensure_column(table, column, decl)
                 self.conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
+
+    def _ensure_column(self, table: str, column: str, decl: str) -> None:
+        cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def schema_version(self) -> int | None:
         row = self.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()

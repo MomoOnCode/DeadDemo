@@ -25,6 +25,7 @@ class Settings:
     auto_parse_downloads: bool = True
     auto_refresh_history: bool = True
     use_steam_gc: bool = True  # ask the Steam Game Coordinator for salts deadlock-api lacks (needs login)
+    history_last_force_ts: float = 0.0  # when we last asked deadlock-api to re-pull history from Valve
     # video clips
     video_backend: str = "window"  # window (capture the game window, works while covered) | screen (desktop
     # duplication, needs the window on top) | engine (experimental: startmovie is silently blocked in retail) | auto
@@ -33,10 +34,14 @@ class Settings:
     video_fps: int = 60
     video_quality: str = "high"  # low | medium | high | max
     video_hide_hud: bool = True
+    video_audio: bool = True  # capture deadlock.exe's audio (window recorder, Windows 10 20348+)
+    video_auto_hdr_off: bool = True  # turn Windows Auto HDR off for deadlock.exe while recording
+    video_preroll_s: float = 6.0  # play this long before each clip so the game finishes loading (mods: +6 s)
     video_concat: bool = False
     video_output_dir: str | None = None
     video_lead_in_s: float = 6.0
     video_lead_out_s: float = 3.0
+    video_chain_kills_s: float = 10.0  # kills this close together become one clip
     vconsole_port: int = 29005
     video_launch_mode: str = "steam"  # steam (ask the Steam client to start the game) | direct (run deadlock.exe)
 

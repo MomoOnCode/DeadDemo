@@ -95,6 +95,15 @@ def test_launch_args():
     assert "-noborder" not in b and b[b.index("-w") + 1] == "1920"
 
 
+def test_audio_plumbing_defaults():
+    from deaddemo.cli import build_parser
+    from deaddemo.core.video.director import RecordSettings
+    from deaddemo.settings import Settings
+
+    assert RecordSettings().audio is True and Settings().video_audio is True
+    assert build_parser().parse_args(["video", "record", "1", "--no-audio"]).no_audio is True
+
+
 def test_merge_ranges():
     merged = _merge([(10, 20, "a"), (18, 25, "b"), (40, 50, "c")], gap=2.0)
     assert merged == [(10, 25, "a + b"), (40, 50, "c")]
@@ -137,3 +146,137 @@ def test_generate_and_persist_sequences():
     vids = VideoRepo(db)
     vid = vids.add(1, "C:/x.mp4", [back[0].id], 1920, 1080, 60, "engine", 9.5)
     assert vids.all()[0].id == vid and vids.all()[0].sequence_ids == [back[0].id]
+
+
+def test_stage_demo_copies_outside_demos_and_cleans_up(tmp_path):
+    from deaddemo.core.video.director import stage_demo
+
+    replays = tmp_path / "game" / "citadel" / "replays"
+    replays.mkdir(parents=True)
+    inside = replays / "1.dem"
+    inside.write_bytes(b"x" * 10)
+    msgs: list[str] = []
+    name, cleanup = stage_demo(replays, str(inside), msgs.append)
+    assert name == "replays/1" and not msgs
+    cleanup()
+    assert inside.exists()  # never deletes what was already there
+    outside = tmp_path / "downloads" / "2.dem"
+    outside.parent.mkdir()
+    outside.write_bytes(b"y" * 20)
+    name, cleanup = stage_demo(replays, str(outside), msgs.append)
+    assert name == "replays/2" and (replays / "2.dem").read_bytes() == b"y" * 20 and "Copying" in msgs[-1]
+    name2, cleanup2 = stage_demo(replays, str(outside), msgs.append)  # second call reuses the copy
+    assert name2 == "replays/2" and "already" in msgs[-1]
+    cleanup2()
+    assert (replays / "2.dem").exists()
+    cleanup()
+    assert not (replays / "2.dem").exists()
+
+
+def test_set_pref_rewrites_one_entry():
+    from deaddemo.core.video.launcher import set_pref
+
+    assert set_pref(None, "AutoHDREnable", "2096") == "AutoHDREnable=2096;"
+    assert set_pref("AppStatus=1;AutoHDREnable=2097;", "AutoHDREnable", "2096") == "AppStatus=1;AutoHDREnable=2096;"
+    assert set_pref("GpuPreference=2;", "AutoHDREnable", "2096") == "GpuPreference=2;AutoHDREnable=2096;"
+
+
+def test_auto_hdr_guard_round_trip(tmp_path):
+    import sys
+
+    if sys.platform != "win32":
+        return
+    import winreg
+
+    from deaddemo.core.video.launcher import AutoHdrGuard
+
+    key = r"Software\DeadDemoTests\UserGpuPreferences"
+    exe = tmp_path / "game.exe"
+    other = tmp_path / "other.exe"
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+            winreg.SetValueEx(k, str(exe), 0, winreg.REG_SZ, "AppStatus=1;AutoHDREnable=2097;")
+        g = AutoHdrGuard(exe, key)
+        assert g.disable() is True
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            assert winreg.QueryValueEx(k, str(exe))[0] == "AppStatus=1;AutoHDREnable=2096;"
+        g.restore()
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            assert winreg.QueryValueEx(k, str(exe))[0] == "AppStatus=1;AutoHDREnable=2097;"
+        g2 = AutoHdrGuard(other, key)  # no entry yet: created for the session, removed again
+        assert g2.disable() is True
+        g2.restore()
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            try:
+                winreg.QueryValueEx(k, str(other))
+                raise AssertionError("entry should have been removed")
+            except FileNotFoundError:
+                pass
+    finally:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_ALL_ACCESS) as k:
+            for name in (str(exe), str(other)):
+                try:
+                    winreg.DeleteValue(k, name)
+                except FileNotFoundError:
+                    pass
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\DeadDemoTests")
+
+
+def test_kills_within_the_chain_window_extend_one_clip():
+    from deaddemo.core.video.sequences import chain_events
+
+    db = Database.open_memory()
+    repo = MatchRepo(db)
+    kills = [{"tick": 0, "match_seconds": t, "attacker_hero_id": 7, "victim_hero_id": v, "assister_hero_ids": []}
+             for t, v in ((100.0, 9), (108.0, 10), (117.0, 11), (140.0, 9))]
+    repo.store_parse_result(
+        match_row={"match_id": 2, "tick_rate": 64, "game_start_tick": 0, "regulation_seconds": 900.0},
+        players=[{"hero_id": 7, "steam_id": 1, "player_name": "me", "team_num": 2}], kills=kills,
+        item_purchases=[], objective_events=[],
+    )
+    assert [len(c) for c in chain_events(kills, 10.0)] == [3, 1]  # 100 -> 108 -> 117 chain; 140 is on its own
+    seqs = generate(db, repo.get(2), 7, GenerateOptions(kinds=("kills",), lead_in_s=6, lead_out_s=3),
+                    lambda h: f"H{h}")
+    assert [(s.start_s, s.end_s, s.label) for s in seqs] == [(94.0, 120.0, "Kills on H9, H10, H11"),
+                                                             (134.0, 143.0, "Kill on H9")]
+    solo = generate(db, repo.get(2), 7, GenerateOptions(kinds=("kills",), lead_in_s=6, lead_out_s=3,
+                                                         chain_kills_s=0, merge_gap_s=0), lambda h: f"H{h}")
+    assert len(solo) == 2 and solo[0].label == "Kill on H9 + Kill on H10 + Kill on H11"  # overlaps still merge
+
+
+def test_bursts_combine_kills_and_assists():
+    db = Database.open_memory()
+    repo = MatchRepo(db)
+    kills = [
+        {"tick": 0, "match_seconds": 200.0, "attacker_hero_id": 7, "victim_hero_id": 9, "assister_hero_ids": []},
+        {"tick": 0, "match_seconds": 206.0, "attacker_hero_id": 8, "victim_hero_id": 10, "assister_hero_ids": [7]},
+        {"tick": 0, "match_seconds": 214.0, "attacker_hero_id": 8, "victim_hero_id": 11, "assister_hero_ids": [7, 12]},
+        {"tick": 0, "match_seconds": 300.0, "attacker_hero_id": 8, "victim_hero_id": 9, "assister_hero_ids": [7]},
+        {"tick": 0, "match_seconds": 400.0, "attacker_hero_id": 9, "victim_hero_id": 8, "assister_hero_ids": []},
+    ]
+    repo.store_parse_result(
+        match_row={"match_id": 3, "tick_rate": 64, "game_start_tick": 0, "regulation_seconds": 900.0},
+        players=[{"hero_id": 7, "steam_id": 1, "player_name": "me", "team_num": 2}], kills=kills,
+        item_purchases=[], objective_events=[],
+    )
+    seqs = generate(db, repo.get(3), 7, GenerateOptions(kinds=("bursts",), lead_in_s=6, lead_out_s=3),
+                    lambda h: f"H{h}")
+    assert [(s.start_s, s.end_s, s.label) for s in seqs] == [(194.0, 217.0, "Burst: 1 kill + 2 assists")]
+    seqs = generate(db, repo.get(3), 7, GenerateOptions(kinds=("bursts",), burst_min_events=1), lambda h: f"H{h}")
+    assert len(seqs) == 2  # the lone assist at 300 s qualifies once the threshold is 1
+
+
+def test_addon_vpk_count(tmp_path):
+    from deaddemo.core.steam.locator import SteamInstall
+    from deaddemo.core.video.launcher import addon_vpk_count
+
+    citadel = tmp_path / "game" / "citadel"
+    (citadel / "addons").mkdir(parents=True)
+    (citadel / "addons" / "a.vpk").write_bytes(b"x")
+    (citadel / "addons" / "b.vpk").write_bytes(b"x")
+    install = SteamInstall(root=None, deadlock_dir=tmp_path)
+    (citadel / "gameinfo.gi").write_bytes(b"SearchPaths { Game citadel }")
+    assert addon_vpk_count(install) == 0  # addons folder not mounted
+    (citadel / "gameinfo.gi").write_bytes(b"SearchPaths { Game citadel/addons Game citadel }")
+    assert addon_vpk_count(install) == 2

@@ -86,6 +86,23 @@ class MatchSalts:
 
 
 @dataclass
+class Accolade:
+    """A post-game accolade tile ("Bring the Pain" = player_damage), from ``/v1/assets/accolades``."""
+
+    id: int
+    class_name: str = ""
+    flavor_name: str = ""
+    tracked_stat_name: str = ""
+    threshold_type: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Accolade:
+        d = _pick(cls, data)
+        d["id"] = int(d.get("id", 0))
+        return cls(**d)
+
+
+@dataclass
 class Hero:
     id: int
     name: str

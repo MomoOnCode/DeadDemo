@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from deaddemo.core.api.client import ApiError, DeadlockApiClient, default_client
-from deaddemo.core.api.models import Hero, Item, MapInfo
+from deaddemo.core.api.models import Accolade, Hero, Item, MapInfo
 
 
 class Catalog:
@@ -16,6 +16,7 @@ class Catalog:
         self._items: dict[int, Item] = {}
         self._items_by_class: dict[str, Item] = {}
         self._map: MapInfo | None = None
+        self._accolades: dict[int, Accolade] | None = None
         self._api_loaded = False
         self._ability_class: dict[int, str] = {}
         self._ability_display: dict[str, str] = {}
@@ -105,6 +106,26 @@ class Catalog:
 
     def map_info(self) -> MapInfo | None:
         return self._map
+
+    def load_accolades(self) -> bool:
+        """Accolade id -> name table (cached on disk for a day). Safe to call from a worker."""
+        if self._accolades is not None:
+            return True
+        try:
+            self._accolades = {a.id: a for a in self.client.accolades()}
+        except ApiError:
+            return False
+        return True
+
+    def accolade_name(self, accolade_id: int | None) -> str:
+        if accolade_id is None:
+            return ""
+        a = (self._accolades or {}).get(int(accolade_id))
+        return a.flavor_name if a and a.flavor_name else f"Accolade {accolade_id}"
+
+    def accolade_stat(self, accolade_id: int | None) -> str:
+        a = (self._accolades or {}).get(int(accolade_id)) if accolade_id is not None else None
+        return a.tracked_stat_name.replace("_", " ") if a else ""
 
     def hero_image(self, hero_id: int, kind: str = "icon_image_small") -> Path | None:
         h = self._heroes.get(hero_id)

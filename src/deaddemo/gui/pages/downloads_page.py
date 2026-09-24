@@ -19,6 +19,7 @@ from deaddemo.core.db.repos import DownloadRow
 from deaddemo.gui.context import AppContext
 from deaddemo.gui.models.table_model import Column, RowTableModel
 from deaddemo.gui.theme import fmt_bytes
+from deaddemo.gui.util import debounced
 
 
 class _ProgressDelegate(QStyledItemDelegate):
@@ -51,6 +52,15 @@ class DownloadsModel(RowTableModel):
             ],
             parent,
         )
+
+    def update_progress(self, download_id: int, done: int, total: int) -> bool:
+        """Refresh one running row's bytes without rebuilding the table."""
+        for i, r in enumerate(self.rows):
+            if r.id == download_id:
+                r.bytes_done, r.bytes_total = done, (total or r.bytes_total)
+                self.dataChanged.emit(self.index(i, 0), self.index(i, self.columnCount() - 1))
+                return True
+        return False
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.UserRole + 1:
@@ -88,14 +98,22 @@ class DownloadsPage(QWidget):
         self.btn_cancel.clicked.connect(self._cancel)
         self.btn_retry.clicked.connect(self._retry)
         self.btn_clear.clicked.connect(self._clear)
-        ctx.events.downloads_changed.connect(self.reload)
+        ctx.events.downloads_changed.connect(debounced(self, self.reload))
+        ctx.events.download_progress.connect(self._progress)
+        self._sized_rows = -1
         self.reload()
+
+    def _progress(self, download_id: int, done: int, total: int) -> None:
+        if not self.model.update_progress(download_id, done, total):
+            self.reload()  # a row we have not seen yet
 
     def reload(self) -> None:
         sel = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
         selected_ids = {self.model.row_at(i).id for i in sel if self.model.row_at(i)}
         self.model.set_rows(self.ctx.downloads.all())
-        self.table.resizeColumnsToContents()
+        if len(self.model.rows) != self._sized_rows:  # measuring every cell is the expensive part
+            self.table.resizeColumnsToContents()
+            self._sized_rows = len(self.model.rows)
         for i, r in enumerate(self.model.rows):
             if r.id in selected_ids:
                 self.table.selectRow(i)

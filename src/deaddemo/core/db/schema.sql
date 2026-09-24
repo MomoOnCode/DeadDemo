@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS api_match_history (
   ranked_delta         INTEGER,
   team_abandoned       INTEGER,
   fetched_at           TEXT NOT NULL,
+  source               TEXT,                -- 'api' (deadlock-api) | 'gc' (Steam Game Coordinator)
   PRIMARY KEY (account_id, match_id)
 );
 
@@ -221,6 +222,20 @@ CREATE TABLE IF NOT EXISTS videos (
   error        TEXT,
   label        TEXT
 );
+
+-- Post-game awards from the match metadata (deadlock-api): mvp_rank 1 = MVP, 2/3 = Key Player.
+CREATE TABLE IF NOT EXISTS match_awards (
+  match_id       INTEGER NOT NULL,
+  hero_id        INTEGER NOT NULL,
+  account_id     INTEGER,
+  team           INTEGER,                   -- metadata team index (0 = Amber, 1 = Sapphire)
+  player_slot    INTEGER,
+  mvp_rank       INTEGER,
+  accolades_json TEXT,                      -- earned accolades: [{"id":4,"value":33255,"stars":1}, ...]
+  fetched_at     TEXT NOT NULL,
+  PRIMARY KEY (match_id, hero_id)
+);
+CREATE INDEX IF NOT EXISTS awards_account ON match_awards(account_id);
 
 CREATE TABLE IF NOT EXISTS calibrations (
   map_name       TEXT PRIMARY KEY,

@@ -12,7 +12,7 @@ import httpx
 
 from deaddemo import __version__, paths
 from deaddemo.core.api.cache import JsonFileCache
-from deaddemo.core.api.models import Hero, Item, MapInfo, MatchHistoryEntry, MatchSalts
+from deaddemo.core.api.models import Accolade, Hero, Item, MapInfo, MatchHistoryEntry, MatchSalts
 
 BASE_URL = "https://api.deadlock-api.com"
 USER_AGENT = f"DeadDemo/{__version__} (+https://github.com/deaddemo)"
@@ -135,6 +135,10 @@ class DeadlockApiClient:
 
     def map_info(self) -> MapInfo:
         return MapInfo.from_dict(self.get_json("/v1/assets/map", ttl_s=ASSETS_TTL))
+
+    def accolades(self) -> list[Accolade]:
+        data = self.get_json("/v1/assets/accolades", ttl_s=ASSETS_TTL)
+        return [Accolade.from_dict(d) for d in data if "id" in d]
 
     # -- binary assets ----------------------------------------------------------------
     def fetch_image(self, url: str, dest_dir: Path | None = None) -> Path:

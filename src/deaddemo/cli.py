@@ -85,7 +85,8 @@ def _cmd_parse(args: argparse.Namespace) -> int:
 def _cmd_history(args: argparse.Namespace) -> int:
     from deaddemo.core.api.service import refresh_history
 
-    entries, account_id = refresh_history(account_id=args.account_id, force_refetch=args.force_refetch)
+    entries, account_id = refresh_history(account_id=args.account_id, force_refetch=args.force_refetch,
+                                          use_gc=not args.no_gc)
     if args.json:
         print(json.dumps([e.to_dict() for e in entries], indent=2))
     else:
@@ -112,6 +113,30 @@ def _cmd_download(args: argparse.Namespace) -> int:
             from deaddemo.core.parse.runner import parse_and_store
 
             parse_and_store(str(dest), progress=lambda msg: print(f"  {msg}"))
+    return 0
+
+
+def _cmd_awards(args: argparse.Namespace) -> int:
+    """MVP / Key Player and accolades for a match, fetched from deadlock-api and stored."""
+    from deaddemo.core.api.awards import store_awards
+    from deaddemo.core.assets.catalog import catalog
+    from deaddemo.core.db.database import Database
+
+    db = Database.open()
+    cat = catalog()
+    cat.load_accolades()
+    for match_id in args.match_id:
+        rows = store_awards(db, int(match_id))
+        if not rows:
+            print(f"match {match_id}: no metadata on deadlock-api (yet)")
+            continue
+        if args.json:
+            print(json.dumps([r.__dict__ for r in rows], indent=1))
+            continue
+        print(f"match {match_id}:")
+        for r in sorted(rows, key=lambda r: ((r.team or 0), r.mvp_rank or 9, r.player_slot or 0)):
+            acc = ", ".join(f"{cat.accolade_name(a['id'])} ({a['value']})" for a in r.accolades[:4])
+            print(f"  team {r.team} {cat.hero_name(r.hero_id):<14} {r.label:<10} {acc}")
     return 0
 
 
@@ -159,6 +184,25 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         for r in provider.fetch_salts([int(m) for m in args.match_id]):
             print(json.dumps(r.__dict__))
         return 0
+    if args.gc_command == "history":
+        from deaddemo.core.api.service import resolve_account_id
+
+        account_id = resolve_account_id(args.account_id)
+        entries = provider.fetch_history(account_id, max_pages=args.pages)
+        for e in entries:
+            print(json.dumps(e))
+        print(f"{len(entries)} matches from the Game Coordinator", file=sys.stderr)
+        if args.store and entries:
+            from deaddemo.core.db.database import Database
+            from deaddemo.core.db.repos import HistoryRepo
+
+            db = Database.open()
+            repo = HistoryRepo(db)
+            known = repo.match_ids(account_id)
+            new = [e for e in entries if int(e["match_id"]) not in known]
+            n = repo.upsert_many(account_id, new, source="gc", replace=False)
+            print(f"stored {n} match(es) the local history did not have", file=sys.stderr)
+        return 0
     return 1
 
 
@@ -189,7 +233,7 @@ def _cmd_video(args: argparse.Namespace) -> int:
     if args.video_command == "sequences":
         hero = _pick_hero(players, args.player)
         opts = GenerateOptions(kinds=tuple(args.kinds.split(",")), lead_in_s=settings.video_lead_in_s,
-                               lead_out_s=settings.video_lead_out_s)
+                               lead_out_s=settings.video_lead_out_s, chain_kills_s=settings.video_chain_kills_s)
         seqs = generate(db, match, hero, opts, catalog().hero_name)
         if args.save:
             SequenceRepo(db).replace_all(match_id, seqs)
@@ -210,6 +254,8 @@ def _cmd_video(args: argparse.Namespace) -> int:
             fps=args.fps or settings.video_fps, quality=settings.video_quality,
             backend=args.backend or settings.video_backend, hide_hud=settings.video_hide_hud,
             concat=args.concat, output_dir=settings.resolved_video_dir(), vcon_port=settings.vconsole_port,
+            audio=settings.video_audio and not args.no_audio, auto_hdr_off=settings.video_auto_hdr_off,
+            preroll_s=settings.video_preroll_s,
             launch_mode=args.launch or settings.video_launch_mode,
         )
         results = director.record(install, db, match_id, seqs[: args.limit] if args.limit else seqs, rs, log)
@@ -256,6 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("history", help="fetch match history from deadlock-api.com")
     s.add_argument("--account-id", type=int)
     s.add_argument("--force-refetch", action="store_true")
+    s.add_argument("--no-gc", action="store_true", help="do not also ask the Steam Game Coordinator")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=_cmd_history)
 
@@ -271,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", dest="json_out")
     s.set_defaults(func=_cmd_export)
 
+    s = sub.add_parser("awards", help="MVP / Key Player and accolades for matches (from deadlock-api metadata)")
+    s.add_argument("match_id", nargs="+")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=_cmd_awards)
+
     g = sub.add_parser("gc", help="Steam Game Coordinator helper (replay salts for your own matches)")
     gs = g.add_subparsers(dest="gc_command", required=True)
     gl = gs.add_parser("login", help="log into Steam once; stores an encrypted refresh token")
@@ -280,6 +332,10 @@ def build_parser() -> argparse.ArgumentParser:
     gs.add_parser("status", help="show helper, login and quota state")
     gsl = gs.add_parser("salts", help="fetch replay salts for match ids")
     gsl.add_argument("match_id", nargs="+")
+    gh = gs.add_parser("history", help="fetch your match history from the Game Coordinator (game must be closed)")
+    gh.add_argument("--account-id", type=int)
+    gh.add_argument("--pages", type=int, default=3)
+    gh.add_argument("--store", action="store_true", help="add matches deadlock-api lacks to the local history")
     g.set_defaults(func=_cmd_gc)
 
     v = sub.add_parser("video", help="film clips from a demo by driving the Deadlock client")
@@ -292,7 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
     vq = vs.add_parser("sequences", help="auto-generate clip sequences for a player")
     vq.add_argument("match_id")
     vq.add_argument("--player", required=True)
-    vq.add_argument("--kinds", default="kills,multikills,teamfights")
+    vq.add_argument("--kinds", default="kills,bursts,multikills,teamfights")
     vq.add_argument("--save", action="store_true")
     vr = vs.add_parser("record", help="record the saved sequences of a match")
     vr.add_argument("match_id")
@@ -302,6 +358,7 @@ def build_parser() -> argparse.ArgumentParser:
     vr.add_argument("--fps", type=int)
     vr.add_argument("--backend", choices=["auto", "engine", "screen", "window"])
     vr.add_argument("--concat", action="store_true")
+    vr.add_argument("--no-audio", action="store_true", help="do not capture the game's audio (window recorder)")
     vr.add_argument("--limit", type=int, help="record only the first N sequences")
     vr.add_argument("--launch", choices=["steam", "direct"])
     v.set_defaults(func=_cmd_video)
@@ -318,6 +375,9 @@ def main(argv: list[str] | None = None) -> int:
         from deaddemo.app import main as gui_main
 
         return gui_main()
+    from deaddemo.core.log import setup_logging
+
+    setup_logging(console=True)
     try:
         return int(args.func(args) or 0)
     except KeyboardInterrupt:

@@ -197,6 +197,21 @@ class MatchRepo:
         ).fetchall()
         return [_row_to(MatchPlayerRow, r) for r in rows]
 
+    def played_by(self, steam_id: int) -> list[tuple[MatchRow, MatchPlayerRow]]:
+        """Every analyzed match this steam id took part in, with that player's row."""
+        rows = self.db.conn.execute(
+            "SELECT m.*, p.hero_id AS p_hero_id FROM matches m JOIN match_players p ON p.match_id = m.match_id "
+            "WHERE p.steam_id=? ORDER BY m.parsed_at DESC", (steam_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            match = _row_to(MatchRow, r)
+            player = self.db.conn.execute("SELECT * FROM match_players WHERE match_id=? AND hero_id=?",
+                                          (match.match_id, r["p_hero_id"])).fetchone()
+            if player:
+                out.append((match, _row_to(MatchPlayerRow, player)))
+        return out
+
     def store_parse_result(
         self,
         *,
@@ -321,6 +336,26 @@ class HistoryRow:
     ranked_delta: int | None
     team_abandoned: int | None
     fetched_at: str
+    source: str | None = None  # 'api' | 'gc' | 'parsed' (synthesized from a local demo, never stored)
+
+    @classmethod
+    def from_parsed(cls, match: MatchRow, player: MatchPlayerRow, start_time: int | None) -> HistoryRow:
+        """A history-shaped row for a match we analyzed locally but no history source has reported."""
+        team = {2: 0, 3: 1}.get(player.team_num or 0)
+        result = {2: 0, 3: 1}.get(match.winning_team or 0)
+        return cls(
+            account_id=(player.steam_id - STEAMID64_BASE) if player.steam_id else 0, match_id=match.match_id,
+            hero_id=player.hero_id, start_time=start_time,
+            match_duration_s=int(match.regulation_seconds) if match.regulation_seconds else None,
+            game_mode=match.game_mode, match_mode=None, player_team=team, match_result=result,
+            player_match_outcome=None, player_kills=player.kills, player_deaths=player.deaths,
+            player_assists=player.assists, denies=player.denies, last_hits=player.last_hits, net_worth=player.souls,
+            hero_level=player.level, ranked_display_badge=None, ranked_delta=None, team_abandoned=None,
+            fetched_at=match.parsed_at or "", source="parsed",
+        )
+
+
+STEAMID64_BASE = 76561197960265728
 
 
 @dataclass
@@ -344,7 +379,20 @@ class HistoryRepo:
         ).fetchall()
         return [_row_to(HistoryRow, r) for r in rows]
 
-    def upsert_many(self, account_id: int, entries: list[dict[str, Any]]) -> int:
+    def match_ids(self, account_id: int) -> set[int]:
+        rows = self.db.conn.execute("SELECT match_id FROM api_match_history WHERE account_id=?",
+                                    (account_id,)).fetchall()
+        return {int(r["match_id"]) for r in rows}
+
+    def newest_start_time(self, account_id: int) -> int | None:
+        row = self.db.conn.execute("SELECT MAX(start_time) AS t FROM api_match_history WHERE account_id=?",
+                                   (account_id,)).fetchone()
+        return int(row["t"]) if row and row["t"] is not None else None
+
+    def upsert_many(self, account_id: int, entries: list[dict[str, Any]], *, source: str = "api",
+                    replace: bool = True) -> int:
+        """Store history entries. ``replace=False`` only adds matches not seen yet (used for the GC feed, whose
+        rows carry fewer fields than deadlock-api's and must not overwrite them). Returns rows written."""
         cols = [f.name for f in fields(HistoryRow)]
         now = utcnow_iso()
         params = []
@@ -352,15 +400,23 @@ class HistoryRepo:
             d = {c: e.get(c) for c in cols}
             d["account_id"] = account_id
             d["fetched_at"] = now
+            d["source"] = source
             if d.get("team_abandoned") is not None:
                 d["team_abandoned"] = int(bool(d["team_abandoned"]))
             params.append([d[c] for c in cols])
+        verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
         with self.db.transaction() as conn:
+            before = conn.total_changes
             conn.executemany(
-                f"INSERT OR REPLACE INTO api_match_history({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
-                params,
+                f"{verb} INTO api_match_history({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})", params,
             )
-        return len(params)
+            written = conn.total_changes - before
+        return written
+
+    def replay_salt_known(self) -> dict[int, bool]:
+        """match_id -> whether a replay salt is on file, for every match we ever asked about (one query)."""
+        rows = self.db.conn.execute("SELECT match_id, replay_salt FROM api_match_salts").fetchall()
+        return {int(r["match_id"]): bool(r["replay_salt"]) for r in rows}
 
     def salts(self, match_id: int) -> SaltsRow | None:
         row = self.db.conn.execute("SELECT * FROM api_match_salts WHERE match_id=?", (match_id,)).fetchone()
@@ -377,6 +433,66 @@ class HistoryRepo:
         result = self.salts(int(s["match_id"]))
         assert result is not None
         return result
+
+
+# --------------------------------------------------------------------------- awards (MVP / Key Player)
+
+
+@dataclass
+class AwardRow:
+    match_id: int
+    hero_id: int
+    account_id: int | None
+    team: int | None  # metadata team index: 0 = Amber (team_num 2), 1 = Sapphire (team_num 3)
+    player_slot: int | None
+    mvp_rank: int | None
+    accolades: list[dict[str, Any]]  # earned only: {"id", "value", "stars"}
+    fetched_at: str = ""
+
+    @property
+    def label(self) -> str:
+        return award_label(self.mvp_rank)
+
+
+def award_label(mvp_rank: int | None) -> str:
+    """The game shows rank 1 as "MVP" and the other ranked players as "Key Player" (honorable mention)."""
+    if not mvp_rank:
+        return ""
+    return "MVP" if mvp_rank == 1 else "Key Player"
+
+
+class AwardsRepo:
+    def __init__(self, db: Database):
+        self.db = db
+
+    @staticmethod
+    def _row(r: sqlite3.Row) -> AwardRow:
+        return AwardRow(r["match_id"], r["hero_id"], r["account_id"], r["team"], r["player_slot"], r["mvp_rank"],
+                        json.loads(r["accolades_json"] or "[]"), r["fetched_at"])
+
+    def has(self, match_id: int) -> bool:
+        return self.db.conn.execute("SELECT 1 FROM match_awards WHERE match_id=? LIMIT 1", (match_id,)).fetchone() \
+            is not None
+
+    def for_match(self, match_id: int) -> dict[int, AwardRow]:
+        rows = self.db.conn.execute("SELECT * FROM match_awards WHERE match_id=?", (match_id,)).fetchall()
+        return {int(r["hero_id"]): self._row(r) for r in rows}
+
+    def for_account(self, account_id: int) -> dict[int, AwardRow]:
+        rows = self.db.conn.execute("SELECT * FROM match_awards WHERE account_id=?", (account_id,)).fetchall()
+        return {int(r["match_id"]): self._row(r) for r in rows}
+
+    def upsert(self, match_id: int, rows: list[AwardRow]) -> int:
+        now = utcnow_iso()
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM match_awards WHERE match_id=?", (match_id,))
+            conn.executemany(
+                """INSERT INTO match_awards(match_id, hero_id, account_id, team, player_slot, mvp_rank,
+                   accolades_json, fetched_at) VALUES (?,?,?,?,?,?,?,?)""",
+                [(match_id, r.hero_id, r.account_id, r.team, r.player_slot, r.mvp_rank, json.dumps(r.accolades),
+                  now) for r in rows],
+            )
+        return len(rows)
 
 
 # --------------------------------------------------------------------------- downloads
@@ -418,6 +534,10 @@ class DownloadRepo:
         result = self.get(int(new_id))
         assert result is not None
         return result
+
+    def set_url(self, download_id: int, url: str) -> None:
+        with self.db.transaction() as conn:
+            conn.execute("UPDATE downloads SET url=? WHERE id=?", (url, download_id))
 
     def update_progress(self, download_id: int, bytes_done: int, bytes_total: int | None) -> None:
         with self.db.transaction() as conn:

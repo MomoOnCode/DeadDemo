@@ -6,10 +6,12 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from deaddemo.core.video import encode
+from deaddemo.core.video.audio import AudioCaptureError, AudioTrack, ProcessAudioCapture, is_supported
 from deaddemo.core.video.console import ConsoleBase
 from deaddemo.core.video.launcher import WindowRect
 
@@ -22,6 +24,7 @@ class ClipFiles:
     frame_pattern: str | None = None
     wav: Path | None = None
     frame_count: int = 0
+    audio: AudioTrack | None = None  # window backend: raw PCM to mux into ``video``
 
 
 class EngineRecorder:
@@ -115,18 +118,26 @@ class WindowRecorder:
     Unlike desktop duplication this captures the window's own surface, so it keeps working while other
     windows cover the game (the player can keep using the PC). WGC delivers a frame only when the content
     changes, so a pacing thread re-sends the latest frame at exactly ``fps`` to keep real-time speed.
-    The window must not be minimized. No audio."""
+    The window must not be minimized.
+
+    With ``audio_pid`` the process's own audio is captured alongside (WASAPI process loopback) and returned
+    as ``ClipFiles.audio`` for the director to mux; any audio failure only logs a warning."""
 
     name = "window"
 
-    def __init__(self, rect: WindowRect, fps: int, quality: str = "high"):
+    def __init__(self, rect: WindowRect, fps: int, quality: str = "high", *, audio_pid: int | None = None,
+                 log: Callable[[str], None] | None = None):
         self.rect = rect
         self.fps = fps
         self.quality = quality
+        self.audio_pid = audio_pid
+        self.log = log or (lambda _msg: None)
         self.proc: subprocess.Popen | None = None
         self.out: Path | None = None
         self.frames_in = 0
         self.frames_out = 0
+        self.first_write_at: float | None = None
+        self.audio: ProcessAudioCapture | None = None
         self._latest: bytes | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -135,6 +146,23 @@ class WindowRecorder:
         self._control = None
         self._thread: threading.Thread | None = None
         self.error: str | None = None
+
+    def _start_audio(self, out: Path) -> None:
+        if self.audio_pid is None:
+            return
+        ok, why = is_supported()
+        if not ok:
+            self.log(f"warning: no game audio: {why}")
+            return
+        try:
+            cap = ProcessAudioCapture(self.audio_pid, out.with_suffix(".pcm"))
+            cap.start()
+        except AudioCaptureError as exc:
+            self.log(f"warning: no game audio: {exc}")
+        except Exception as exc:  # noqa: BLE001 - audio must never break the video capture
+            self.log(f"warning: no game audio: {type(exc).__name__}: {exc}")
+        else:
+            self.audio = cap
 
     def start(self, out: Path, first_frame_timeout: float = 10.0) -> None:
         from windows_capture import WindowsCapture
@@ -164,6 +192,7 @@ class WindowRecorder:
         if not self._first.wait(first_frame_timeout):
             self._control.stop()
             raise RuntimeError("window capture delivered no frame (is the game window minimized?)")
+        self._start_audio(out)  # before ffmpeg spawns, so the audio normally leads the first video frame
         args = [encode.ffmpeg_path(), "-hide_banner", "-y", "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{w}x{h}",
                 "-framerate", str(self.fps), "-i", "-", *encode.video_codec_args(self.quality), "-movflags",
                 "+faststart", str(out)]
@@ -182,6 +211,8 @@ class WindowRecorder:
                 with self._lock:
                     data = self._latest
                 if data is not None:
+                    if self.first_write_at is None:
+                        self.first_write_at = time.perf_counter()  # video t=0, for audio alignment
                     self.proc.stdin.write(data)
                     self.frames_out += 1
                 next_at += period
@@ -197,13 +228,22 @@ class WindowRecorder:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
-        if self._control is not None:
-            try:
-                self._control.stop()
-            except Exception:  # noqa: BLE001 - the capture may already be gone with the window
-                pass
+        track: AudioTrack | None = None
+        try:
+            if self._control is not None:
+                try:
+                    self._control.stop()
+                except Exception:  # noqa: BLE001 - the capture may already be gone with the window
+                    pass
+        finally:
+            if self.audio is not None:
+                track = self.audio.stop(self.first_write_at)
+                if track is None:
+                    self.log(f"warning: game audio dropped: {self.audio.error}")
+                for w in self.audio.warnings:
+                    self.log("warning: " + w)
         if self.proc is None:
-            return ClipFiles(self.name)
+            return ClipFiles(self.name, audio=track)
         try:
             self.proc.stdin.close()  # type: ignore[union-attr]
         except OSError:
@@ -217,4 +257,4 @@ class WindowRecorder:
             raise RuntimeError(self.error + ": " + err.decode("utf-8", "replace")[-400:])
         if self.proc.returncode != 0 and not (self.out and self.out.exists()):
             raise RuntimeError(f"window capture encode failed: {err.decode('utf-8', 'replace')[-600:]}")
-        return ClipFiles(self.name, video=self.out, frame_count=self.frames_out)
+        return ClipFiles(self.name, video=self.out, frame_count=self.frames_out, audio=track)
