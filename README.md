@@ -1,5 +1,10 @@
 # DeadDemo
 
+I am a real developer I promise, but please know this was an AI driven proof of concept that worked out quite well. Eventually this disclaimer will be removed as I comb through and extensively test and fix the slop that was provided implement the features. It utilizes your steam login and understand you are trusting your steam credentials with vibe-coded software.  
+
+
+# Cue Claude Generated README I never asked it to make :)
+
 A demo manager for Valve's Deadlock, in the spirit of CS Demo Manager: find the replays the game
 has downloaded, archive them before Valve expires them, parse them into stats, and replay them on a
 2D minimap.
@@ -105,24 +110,3 @@ uv run deaddemo gc status
 Or use Settings → Steam login in the GUI. After that, "Download" on the Matches page falls back to
 Steam automatically when deadlock-api has no salt.
 
-### Secrets
-
-- Nothing secret is ever written into the project folder; `.env`, `*.token` and `secrets/` are
-  git-ignored and `.env.example` documents the variables.
-- `DEADLOCK_API_KEY` (optional), `DEADDEMO_STEAM_USER`, `DEADDEMO_STEAM_PASSWORD`,
-  `DEADDEMO_STEAM_GUARD_CODE` are read from the environment or a `.env` file. The GUI login dialog
-  passes the password to the helper through its environment only.
-- The Steam token the helper returns is stored under the app data folder, encrypted with Windows
-  DPAPI (user-bound) on Windows and as a 0600 file elsewhere. `deaddemo gc logout` deletes it.
-- steam-vent stores its Steam Guard machine token in the OS user cache directory, so subsequent
-  logins on this machine do not prompt for a code again.
-- Being logged into Deadlock on the same account at the same time can make Steam reject the helper's
-  session; run lookups while the game is closed if that happens.
-- **Compression.** Replay URLs end in `.dem.bz2`, but Valve currently serves zstd frames. The
-  downloader sniffs zstd, bzip2 and raw demos.
-- **Version lock.** The game refuses to play demos recorded on an older build. The Demos page shows
-  the demo build next to the installed client build; parsing and the 2D viewer still work.
-- **boon and patch days.** Deadlock patches weekly and boon tracks it closely. The boon version is
-  pinned to a minor release and shown in the status bar; "Reparse" re-runs a demo after upgrading.
-- **Souls vs net worth.** Tables show net worth (`gold_net_worth`), which is what the in-game
-  scoreboard and the API report; the raw `souls` column in the Parquet is unspent souls.
